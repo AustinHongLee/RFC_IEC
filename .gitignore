@@ -1,0 +1,8 @@
+# Python 虛擬環境與快取
+.venv/
+__pycache__/
+*.pyc
+*.log
+backup/
+# 若不想把資料庫一起上傳,把下一行最前面的 # 刪掉:
+# 焊口管理系統/weld.db

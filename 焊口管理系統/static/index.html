@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>焊口管理系統</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="logo">焊口管理系統<small>Weld Joint Management System</small></div>
+  <div class="field-inline">
+    <label>專案</label>
+    <select id="projectSel"></select>
+    <button class="btn sm" id="newProjectBtn">＋ 新專案</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="field-inline">
+    <label>操作人</label>
+    <input id="operator" placeholder="你的名字" style="width:110px" value="">
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-view="dashboard" class="active">儀表板</button>
+  <button data-view="drawings">圖面登錄</button>
+  <button data-view="joints">焊口登錄</button>
+  <button data-view="billing">請款期別</button>
+  <button data-view="issues">問題追蹤</button>
+  <button data-view="master">基礎資料</button>
+  <button data-view="io">匯入 / 匯出</button>
+  <button data-view="audit">稽核日誌</button>
+</nav>
+
+<main>
+  <!-- 儀表板 -->
+  <section class="view active" id="view-dashboard">
+    <h2 class="title">專案儀表板</h2>
+    <p class="sub" id="dashSub"></p>
+    <div class="cards" id="kpiCards"></div>
+    <div class="grid2">
+      <div class="panel"><h3>各系統進度</h3><div class="body"><div class="distrib" id="bySystem"></div></div></div>
+      <div class="panel"><h3>各銲接型式</h3><div class="body"><div class="distrib" id="byType"></div></div></div>
+    </div>
+    <div class="grid2">
+      <div class="panel"><h3>焊口狀態分佈</h3><div class="body"><div class="distrib" id="byStatus"></div></div></div>
+      <div class="panel"><h3>各請款期別 (DB數)</h3><div class="body"><div class="distrib" id="byBilling"></div></div></div>
+    </div>
+  </section>
+
+  <!-- 圖面 -->
+  <section class="view" id="view-drawings">
+    <div class="row-between">
+      <div><h2 class="title">圖面登錄 (ISO Drawing)</h2><p class="sub">業主圖號 → 公司流水號 → 掛焊口</p></div>
+      <button class="btn primary" id="addDrawingBtn">＋ 新增圖面</button>
+    </div>
+    <div class="filters">
+      <input type="search" id="drawingSearch" placeholder="搜尋圖號 / 流水號">
+    </div>
+    <div class="tablewrap"><table id="drawingTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 焊口 -->
+  <section class="view" id="view-joints">
+    <div class="row-between">
+      <div><h2 class="title">焊口登錄</h2><p class="sub">點任一列可編輯完整資訊 / 檢驗 / 狀態</p></div>
+      <button class="btn primary" id="addJointBtn">＋ 新增焊口</button>
+    </div>
+    <div class="filters">
+      <input type="search" id="jointSearch" placeholder="搜尋銲口編號 / 圖號 / 材質">
+      <select id="jointStatus"><option value="">全部狀態</option></select>
+      <select id="jointSystem"><option value="">全部系統</option></select>
+      <span class="muted" id="jointCount"></span>
+    </div>
+    <div class="tablewrap"><table id="jointTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 請款 -->
+  <section class="view" id="view-billing">
+    <div class="row-between">
+      <div><h2 class="title">請款期別</h2><p class="sub">依完成日期自動歸期,統計各期 DB 數</p></div>
+      <div>
+        <button class="btn" id="autoAssignBtn">⚙ 依完成日自動歸期</button>
+        <button class="btn primary" id="addBillingBtn">＋ 新增期別</button>
+      </div>
+    </div>
+    <div class="tablewrap"><table id="billingTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 問題 -->
+  <section class="view" id="view-issues">
+    <div class="row-between">
+      <div><h2 class="title">問題追蹤</h2><p class="sub">欠接頭、新增焊口、圖面問題…</p></div>
+      <button class="btn primary" id="addIssueBtn">＋ 新增問題</button>
+    </div>
+    <div class="tablewrap"><table id="issueTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 基礎資料 -->
+  <section class="view" id="view-master">
+    <h2 class="title">基礎資料</h2>
+    <p class="sub">系統、焊工、WPS、銲接型式</p>
+    <div class="grid2">
+      <div class="panel"><h3>系統 System <button class="btn sm" id="addSystemBtn" style="float:right">＋</button></h3>
+        <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="systemTable"><thead></thead><tbody></tbody></table></div></div></div>
+      <div class="panel"><h3>焊工 Welder <button class="btn sm" id="addWelderBtn" style="float:right">＋</button></h3>
+        <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="welderTable"><thead></thead><tbody></tbody></table></div></div></div>
+    </div>
+    <div class="panel"><h3>WPS 銲接程序規範 <button class="btn sm" id="addWpsBtn" style="float:right">＋</button></h3>
+      <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="wpsTable"><thead></thead><tbody></tbody></table></div></div></div>
+  </section>
+
+  <!-- 匯入匯出 -->
+  <section class="view" id="view-io">
+    <h2 class="title">匯入 / 匯出</h2>
+    <p class="sub">把現有「焊口管制表」Excel 匯入新專案;或把目前資料匯出 Excel</p>
+    <div class="grid2">
+      <div class="panel"><h3>匯入焊口管制表</h3><div class="body">
+        <div class="hint">會讀取「焊口編號明細」與「DWG NO.ALL / DRAWING LIST」分頁,自動建立圖面、焊口、系統、管線。</div>
+        <div class="formgrid">
+          <div class="fg"><label>專案代號 *</label><input id="impCode" placeholder="例如 cp-129"></div>
+          <div class="fg"><label>專案名稱 *</label><input id="impName" placeholder="例如 HP6精濾區配管工事"></div>
+          <div class="fg full"><label>業主</label><input id="impOwner" placeholder="(選填)"></div>
+          <div class="fg full"><label>Excel 檔</label><input type="file" id="impFile" accept=".xlsx,.xlsm"></div>
+        </div>
+        <div style="margin-top:14px"><button class="btn primary" id="doImportBtn">開始匯入</button></div>
+        <div id="importResult" style="margin-top:12px"></div>
+      </div></div>
+      <div class="panel"><h3>匯出</h3><div class="body">
+        <p class="muted">將目前選定專案的焊口明細匯出為 Excel(含圖號、流水號、檢驗、請款等欄位)。</p>
+        <button class="btn" id="exportJointsBtn">⬇ 匯出焊口明細 (.xlsx)</button>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- 稽核 -->
+  <section class="view" id="view-audit">
+    <h2 class="title">稽核日誌</h2>
+    <p class="sub">每筆新增 / 修改 / 刪除 / 匯入都會記錄</p>
+    <div class="tablewrap"><table id="auditTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<!-- Modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <header><h3 id="modalTitle">編輯</h3><button class="x" id="modalClose">×</button></header>
+    <div class="content" id="modalBody"></div>
+    <footer id="modalFooter"></footer>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
