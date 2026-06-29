@@ -150,7 +150,7 @@ function renderView(v) {
     $('#view-' + v).querySelectorAll('.tablewrap tbody').forEach(b => b.innerHTML = '');
   }
   ({ dashboard: renderDashboard, drawings: renderDrawings, joints: renderJoints,
-     billing: renderBilling, issues: renderIssues, master: renderMaster,
+     spools: renderSpools, billing: renderBilling, issues: renderIssues, master: renderMaster,
      audit: renderAudit, io: () => {} }[v] || (() => {}))();
 }
 
@@ -256,17 +256,17 @@ async function renderJoints() {
   });
   const res = await api('GET', `/projects/${State.project.id}/joints?` + p);
   $('#jointCount').textContent = `共 ${res.total} 筆` + (res.total > 300 ? '(顯示前 300)' : '');
-  const cols = ['流水號', '圖號', '銲口', '尺寸', '材質', '型式', 'S/F', '完成日期', '狀態', '檢驗', '請款期別', ''];
+  const cols = ['流水號', '圖號', '銲口', '尺寸', '材質', '型式', 'S/F', 'Spool', '完成日期', '狀態', '檢驗', '請款期別', ''];
   $('#jointTable thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
   $('#jointTable tbody').innerHTML = res.rows.length ? res.rows.map(r => `<tr class="clickable" onclick="editJoint(${r.id})">
     <td class="mono">${esc(r.serial_no)}</td><td>${esc(r.drawing_no)}</td>
     <td class="mono">${esc(r.joint_no)}</td><td>${esc(r.size)}</td><td>${esc(r.material)}</td>
-    <td>${esc(r.weld_type)}</td><td>${esc(r.shop_field)}</td><td>${esc(r.weld_date) || ''}</td>
+    <td>${esc(r.weld_type)}</td><td>${esc(r.shop_field)}</td><td class="mono">${esc(r.spool_no) || ''}</td><td>${esc(r.weld_date) || ''}</td>
     <td>${statusBadge(r.status)}</td>
     <td>${r.nde_result ? esc(r.nde_result) : (r.nde_type ? '<span class="muted">待檢</span>' : '')}</td>
     <td>${esc(r.billing_period) || ''}</td>
     <td><button class="btn sm" onclick="event.stopPropagation();advanceJoint(${r.id})">推進▶</button></td></tr>`).join('')
-    : `<tr><td colspan="12" class="empty">尚無焊口</td></tr>`;
+    : `<tr><td colspan="13" class="empty">尚無焊口</td></tr>`;
 }
 ['jointSearch'].forEach(id => $('#' + id).oninput = debounce(renderJoints, 300));
 ['jointStatus', 'jointSystem'].forEach(id => $('#' + id).onchange = renderJoints);
@@ -276,12 +276,13 @@ function jointFields() {
   return [
     { section: '基本資料' },
     { key: 'drawing_id', label: '所屬圖面', type: 'select', options: State.drawings.map(d => ({ v: d.id, t: (d.serial_no ? d.serial_no + '｜' : '') + d.drawing_no })) },
+    { key: 'spool_id', label: 'Spool 分段', type: 'select', options: (State.spoolOptions || []).map(s => ({ v: s.id, t: s.spool_no + (s.shop_field ? ` (${s.shop_field})` : '') })) },
     { key: 'joint_no', label: '銲口編號 *' },
     { key: 'size', label: '尺寸' }, { key: 'thickness', label: '厚度' },
     { key: 'schedule', label: 'SCH' }, { key: 'material', label: '材質' },
     { key: 'weld_type_id', label: '銲接型式', type: 'select', options: L.weld_types.map(w => ({ v: w.id, t: w.code + (w.name ? ' ' + w.name : '') })) },
     { key: 'joint_category', label: '分類 (消防/工業級…)' },
-    { key: 'db_factor', label: '係數', type: 'number', default: 1 }, { key: 'db_count', label: 'DB 數', type: 'number' },
+    { key: 'db_factor', label: '係數', type: 'number', default: 1 }, { key: 'db_count', label: 'DB 數(留空自動計算)', type: 'number' },
     { key: 'shop_field', label: '預製S/現場F', type: 'select', options: [{ v: 'S', t: 'S 預製' }, { v: 'F', t: 'F 現場' }] },
     { section: '製程與追溯' },
     { key: 'welding_process', label: '銲接製程 (GTAW…)' },
@@ -315,9 +316,14 @@ async function editJoint(id) {
     State.drawings = dr.rows; State.drawings._pid = State.project.id;
   }
   const data = id ? await api('GET', `/joints/${id}`) : {};
+  State.spoolOptions = [];
+  if (data.drawing_id) {
+    try { State.spoolOptions = await api('GET', `/drawings/${data.drawing_id}/spools`); } catch (e) {}
+  }
   const fields = jointFields();
   let body = formHTML(fields, data);
   if (id && data.inspections) body += inspectionBlock(id, data.inspections);
+  if (id) body += materialBlock(id, data.materials || []);
   openModal(id ? `編輯焊口  ${esc(data.joint_no || '')}` : '新增焊口', body, [
     id ? { label: '刪除', cls: 'danger', onClick: () => delJoint(id) } : null,
     { label: '取消', onClick: closeModal },
@@ -351,6 +357,33 @@ async function addInspection(jid) {
   });
   toast('已新增檢驗'); editJoint(jid);
 }
+function materialBlock(jid, list) {
+  const L = State.lookups;
+  const rows = (list || []).map(m => `<tr><td>${esc(m.role)}</td><td>${esc(m.heat_no) || ''}</td>
+    <td>${esc(m.batch_no) || ''}${m.aws_class ? ' ' + esc(m.aws_class) : ''}</td>
+    <td><button class="btn sm danger" onclick="delJointMaterial(${m.id},${jid})">刪</button></td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">尚無材料</td></tr>';
+  const heatOpts = (L.heats || []).map(h => `<option value="${h.id}">${esc(h.heat_no)}</option>`).join('');
+  const fillerOpts = (L.fillers || []).map(f => `<option value="${f.id}">${esc(f.batch_no)}</option>`).join('');
+  return `<div class="section-label" style="margin-top:18px">材料追溯 (爐號 / 銲材)</div>
+    <table style="width:100%;font-size:13px"><thead><tr><th>角色</th><th>爐號</th><th>銲材</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="formgrid three" style="margin-top:10px">
+      <div class="fg"><label>角色</label><select id="m_role"><option>A側母材</option><option>B側母材</option><option>銲材</option><option>背檔氣</option></select></div>
+      <div class="fg"><label>爐號</label><select id="m_heat"><option value="">—</option>${heatOpts}</select></div>
+      <div class="fg"><label>銲材</label><select id="m_filler"><option value="">—</option>${fillerOpts}</select></div>
+      <div class="fg" style="align-self:end"><button class="btn sm primary" onclick="addJointMaterial(${jid})">＋ 新增材料</button></div>
+    </div>`;
+}
+async function addJointMaterial(jid) {
+  const payload = { role: $('#m_role').value, heat_id: $('#m_heat').value || null, filler_id: $('#m_filler').value || null };
+  if (!payload.heat_id && !payload.filler_id) return toast('請選爐號或銲材', 'err');
+  await api('POST', `/joints/${jid}/materials`, payload);
+  toast('已新增材料'); editJoint(jid);
+}
+async function delJointMaterial(mid, jid) {
+  await api('DELETE', `/jmaterials/${mid}?operator=${encodeURIComponent(operator())}`);
+  toast('已刪除'); editJoint(jid);
+}
 async function advanceJoint(id) {
   await api('POST', `/joints/${id}/advance`, {});
   toast('狀態已推進'); renderJoints();
@@ -361,6 +394,78 @@ async function delJoint(id) {
   toast('已刪除'); closeModal(); renderJoints();
 }
 $('#addJointBtn').onclick = () => editJoint(0);
+$('#recomputeDbBtn').onclick = async () => {
+  if (!State.project) return;
+  if (!confirm('將為「DB數空白」且有尺寸的焊口自動補算 DB數(max(1,吋)×係數),確定?')) return;
+  const r = await api('POST', `/projects/${State.project.id}/joints/recompute-db`, { only_blank: true });
+  toast(`已補算 ${r.updated} 筆`); renderJoints();
+};
+
+/* ===========================================================
+   Spool 分段
+   =========================================================== */
+async function renderSpools() {
+  if (!State.project) return;
+  const q = $('#spoolSearch').value.trim();
+  const res = await api('GET', `/projects/${State.project.id}/spools?q=${encodeURIComponent(q)}`);
+  $('#spoolCount').textContent = `共 ${res.total} 個`;
+  const cols = ['圖號', '流水號', 'Spool 編號', 'S/F', '狀態', '焊口數', '完成', 'DB數', '預製圖掃描', ''];
+  $('#spoolTable thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+  $('#spoolTable tbody').innerHTML = res.rows.length ? res.rows.map(r => `<tr>
+    <td>${esc(r.drawing_no)}</td><td class="mono">${esc(r.serial_no)}</td>
+    <td class="mono">${esc(r.spool_no)}</td><td>${esc(r.shop_field)}</td>
+    <td>${statusBadge(r.status)}</td><td class="mono">${r.joint_count}</td>
+    <td class="mono">${r.welded}/${r.joint_count}</td><td class="mono">${r.db}</td>
+    <td>${esc(r.scan_date) || '<span class="muted">—</span>'}</td>
+    <td><button class="btn sm" onclick="editSpool(${r.id})">編輯</button></td></tr>`).join('')
+    : `<tr><td colspan="10" class="empty">尚無 spool,可按「自動建立預製 spool」或「新增 spool」</td></tr>`;
+}
+$('#spoolSearch').oninput = debounce(renderSpools, 300);
+
+function spoolFields() {
+  return [
+    { key: 'drawing_id', label: '所屬圖面 *', type: 'select', options: State.drawings.map(d => ({ v: d.id, t: (d.serial_no ? d.serial_no + '｜' : '') + d.drawing_no })) },
+    { key: 'spool_no', label: 'Spool 編號 *' },
+    { key: 'shop_field', label: '性質', type: 'select', empty: false, options: [{ v: 'S', t: 'S 預製' }, { v: 'F', t: 'F 現場' }] },
+    { key: 'status', label: '狀態', type: 'select', empty: false, options: ['規劃', '下料', '組對', '銲接', 'NDE', '油漆', '完成', '出貨'].map(s => ({ v: s, t: s })) },
+    { key: 'fab_dwg_no', label: '預製圖號' },
+    { key: 'scan_date', label: '預製圖掃描日期', type: 'date' },
+    { key: 'ship_date', label: '出貨到場日', type: 'date' },
+    { key: 'remark', label: '備註', type: 'textarea', full: true },
+  ];
+}
+async function editSpool(id) {
+  if (!State.drawings.length || State.drawings._pid !== State.project.id) {
+    const dr = await api('GET', `/projects/${State.project.id}/drawings?limit=2000`);
+    State.drawings = dr.rows; State.drawings._pid = State.project.id;
+  }
+  const data = id ? (await api('GET', `/projects/${State.project.id}/spools`)).rows.find(r => r.id === id) : {};
+  const fields = spoolFields();
+  openModal(id ? '編輯 spool' : '新增 spool', formHTML(fields, data), [
+    id ? { label: '刪除', cls: 'danger', onClick: () => delSpool(id) } : null,
+    { label: '取消', onClick: closeModal },
+    { label: '儲存', cls: 'primary', onClick: async () => {
+        const b = collectForm(fields);
+        if (!b.drawing_id) return toast('請選圖面', 'err');
+        if (!b.spool_no) return toast('請填 spool 編號', 'err');
+        if (id) await api('PUT', `/spools/${id}`, b);
+        else await api('POST', `/projects/${State.project.id}/spools`, b);
+        toast('已儲存'); closeModal(); renderSpools();
+      } },
+  ].filter(Boolean));
+}
+async function delSpool(id) {
+  if (!confirm('確定刪除此 spool?其焊口的 spool 關聯會被清除(焊口本身保留)。')) return;
+  await api('DELETE', `/spools/${id}?operator=${encodeURIComponent(operator())}`);
+  toast('已刪除'); closeModal(); renderSpools();
+}
+$('#addSpoolBtn').onclick = () => editSpool(0);
+$('#autoBuildSpoolBtn').onclick = async () => {
+  if (!State.project) return;
+  if (!confirm('將為每張圖的「預製(S)」焊口各建一個預設 spool 並掛上(只處理尚未歸 spool 的),確定?')) return;
+  const r = await api('POST', `/projects/${State.project.id}/spools/auto-build`, {});
+  toast(`已建立 ${r.built} 個 spool,已歸 spool 焊口共 ${r.assigned_total}`); renderSpools();
+};
 
 /* ===========================================================
    請款
@@ -432,14 +537,19 @@ $('#addIssueBtn').onclick = () => {
 async function renderMaster() {
   if (!State.project) return;
   const pid = State.project.id;
-  const [sys, wel, wps] = await Promise.all([
-    api('GET', `/projects/${pid}/systems`), api('GET', `/projects/${pid}/welders`), api('GET', `/projects/${pid}/wps`)]);
+  const [sys, wel, wps, heats, fillers] = await Promise.all([
+    api('GET', `/projects/${pid}/systems`), api('GET', `/projects/${pid}/welders`), api('GET', `/projects/${pid}/wps`),
+    api('GET', `/projects/${pid}/heats`), api('GET', `/projects/${pid}/fillers`)]);
   $('#systemTable thead').innerHTML = '<tr><th>代碼</th><th>中文</th><th>等級</th><th>材質</th></tr>';
   $('#systemTable tbody').innerHTML = sys.map(s => `<tr><td><b>${esc(s.code)}</b></td><td>${esc(s.name_zh)}</td><td>${esc(s.pipe_class)}</td><td>${esc(s.material)}</td></tr>`).join('') || emptyRow(4);
   $('#welderTable thead').innerHTML = '<tr><th>鋼印</th><th>姓名</th><th>證照</th><th>製程</th></tr>';
   $('#welderTable tbody').innerHTML = wel.map(s => `<tr><td><b>${esc(s.stamp)}</b></td><td>${esc(s.name)}</td><td>${esc(s.cert_no)}</td><td>${esc(s.process)}</td></tr>`).join('') || emptyRow(4);
   $('#wpsTable thead').innerHTML = '<tr><th>WPS No.</th><th>製程</th><th>材料群組</th><th>厚度範圍</th></tr>';
   $('#wpsTable tbody').innerHTML = wps.map(s => `<tr><td><b>${esc(s.wps_no)}</b></td><td>${esc(s.process)}</td><td>${esc(s.material_group)}</td><td>${esc(s.thk_min || '')}~${esc(s.thk_max || '')}</td></tr>`).join('') || emptyRow(4);
+  $('#heatTable thead').innerHTML = '<tr><th>爐號</th><th>規格</th><th>P-No</th><th>MTR</th><th>PMI</th></tr>';
+  $('#heatTable tbody').innerHTML = heats.map(s => `<tr><td><b>${esc(s.heat_no)}</b></td><td>${esc(s.spec)}</td><td>${esc(s.p_no)}</td><td>${esc(s.mtr_no)}</td><td>${s.pmi_done ? '✓' : ''}</td></tr>`).join('') || emptyRow(5);
+  $('#fillerTable thead').innerHTML = '<tr><th>批號</th><th>AWS</th><th>F-No</th><th>規格</th></tr>';
+  $('#fillerTable tbody').innerHTML = fillers.map(s => `<tr><td><b>${esc(s.batch_no)}</b></td><td>${esc(s.aws_class)}</td><td>${esc(s.f_no)}</td><td>${esc(s.spec)}</td></tr>`).join('') || emptyRow(4);
 }
 const emptyRow = n => `<tr><td colspan="${n}" class="muted">尚無資料</td></tr>`;
 function masterAdd(title, fields, path, after) {
@@ -459,6 +569,12 @@ $('#addWelderBtn').onclick = () => masterAdd('新增焊工',
 $('#addWpsBtn').onclick = () => masterAdd('新增 WPS',
   [{ key: 'wps_no', label: 'WPS No. *' }, { key: 'process', label: '製程' }, { key: 'material_group', label: '材料群組 (P-No)' }, { key: 'thk_min', label: '厚度下限', type: 'number' }, { key: 'thk_max', label: '厚度上限', type: 'number' }, { key: 'remark', label: '備註', full: true }],
   'wps', () => { renderMaster(); selectProject(State.project.id); });
+$('#addHeatBtn').onclick = () => masterAdd('新增爐號 / MTR',
+  [{ key: 'heat_no', label: '爐號 *' }, { key: 'spec', label: '材質規格' }, { key: 'p_no', label: 'P-No' }, { key: 'size', label: '尺寸' }, { key: 'schedule', label: 'SCH' }, { key: 'mtr_no', label: 'MTR 文件號' }, { key: 'mtr_path', label: 'MTR 路徑/連結', full: true }, { key: 'pmi_done', label: 'PMI 完成', type: 'checkbox' }, { key: 'remark', label: '備註', full: true }],
+  'heats', () => { renderMaster(); selectProject(State.project.id); });
+$('#addFillerBtn').onclick = () => masterAdd('新增銲材',
+  [{ key: 'batch_no', label: '批號 *' }, { key: 'aws_class', label: 'AWS class' }, { key: 'f_no', label: 'F-No' }, { key: 'spec', label: '規格' }, { key: 'bake_log', label: '烘箱紀錄' }, { key: 'remark', label: '備註', full: true }],
+  'fillers', () => { renderMaster(); selectProject(State.project.id); });
 
 /* ===========================================================
    稽核

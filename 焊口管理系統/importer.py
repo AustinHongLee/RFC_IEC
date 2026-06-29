@@ -10,6 +10,7 @@ import datetime
 import openpyxl
 
 import db
+import sizes
 
 JOINT_ALIASES = {
     "drawing_no": ["圖號", "DWGNO", "DWGNO.", "file_basename", "圖面編號"],
@@ -45,6 +46,14 @@ DRAWING_ALIASES = {
     "rev":        ["版次"],
     "scan_date":  ["預製圖掃描日期", "預製掃描日期", "掃描日期"],
     "remark":     ["REMARKS", "備註"],
+}
+COMPLETION_ALIASES = {
+    "joint_no":   ["銲口編號", "焊口編號", "銲口號", "焊口號"],
+    "serial":     ["流水號", "流水號.數字化"],
+    "drawing_no": ["圖號", "DWGNO", "DWGNO."],
+    "weld_date":  ["配管完成日期", "組銲完成日期", "完成日期", "組焊完成日期"],
+    "shop_field": ["S/F", "預製S/現場F", "預製S/F"],
+    "subcontractor": ["施工廠商", "承包商", "外包"],
 }
 
 
@@ -123,6 +132,75 @@ def _f(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _key(v):
+    if v is None:
+        return None
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    s = str(v).strip()
+    return s or None
+
+
+def _find_header(rows, must="銲口編號", scan=10):
+    must = normalize(must)
+    for i in range(min(scan, len(rows))):
+        if any(must == normalize(c) for c in rows[i] if c is not None):
+            return i
+    return 0
+
+
+def _merge_completion(ex, project_id, wb):
+    """讀完成分頁(完成焊口建檔 / 已申報完成焊口明細),以(圖號或流水號)+銲口編號比對,
+    回填 weld_date / shop_field / subcontractor,狀態設為完成。回傳更新筆數。"""
+    sheet = pick_sheet(wb,
+                       lambda n: n.startswith("完成焊口建檔"),
+                       lambda n: n.startswith("已申報完成焊口明細"),
+                       lambda n: n.startswith("完成焊口"))
+    if sheet is None:
+        return 0
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return 0
+    hi = _find_header(rows)
+    cmap = build_map(rows[hi], COMPLETION_ALIASES)
+    if "joint_no" not in cmap or "weld_date" not in cmap:
+        return 0
+    lut = {}
+    for jid, jno, serial, dno in ex(
+            "SELECT wj.id, wj.joint_no, d.serial_no, d.drawing_no "
+            "FROM weld_joint wj LEFT JOIN drawing d ON wj.drawing_id=d.id "
+            "WHERE wj.project_id=?", (project_id,)).fetchall():
+        jk = _key(jno)
+        if serial is not None:
+            lut[("s", _key(serial), jk)] = jid
+        if dno is not None:
+            lut[("d", _key(dno), jk)] = jid
+    n = 0
+    for r in rows[hi + 1:]:
+        jno = cell(r, cmap, "joint_no")
+        if jno is None:
+            continue
+        wd = roc_to_iso(cell(r, cmap, "weld_date"))
+        if not wd:
+            continue
+        jk = _key(jno)
+        dno = cell(r, cmap, "drawing_no")
+        serial = cell(r, cmap, "serial")
+        jid = None
+        if dno is not None:
+            jid = lut.get(("d", _key(dno), jk))
+        if jid is None and serial is not None:
+            jid = lut.get(("s", _key(serial), jk))
+        if jid is None:
+            continue
+        ex("UPDATE weld_joint SET weld_date=COALESCE(weld_date,?), "
+           "shop_field=COALESCE(shop_field,?), subcontractor=COALESCE(subcontractor,?), "
+           "status='完成' WHERE id=?",
+           (wd, _s(cell(r, cmap, "shop_field")), _s(cell(r, cmap, "subcontractor")), jid))
+        n += 1
+    return n
 
 
 def import_weld_control(path, project_code, project_name, owner=None,
@@ -247,6 +325,9 @@ def import_weld_control(path, project_code, project_name, owner=None,
                 nde_date = roc_to_iso(cell(r, cmap, "nde_date"))
                 report = _s(cell(r, cmap, "nde_report"))
                 percent = _s(cell(r, cmap, "nde_percent"))
+                _dbc = _f(cell(r, cmap, "db_count"))
+                if _dbc is None:
+                    _dbc = sizes.db_count(_s(cell(r, cmap, "size")), _f(cell(r, cmap, "db_factor")) or 1)
                 try:
                     jid = ex(
                         "INSERT INTO weld_joint (project_id,drawing_id,line_id,joint_no,size,thickness,"
@@ -257,7 +338,7 @@ def import_weld_control(path, project_code, project_name, owner=None,
                          _s(cell(r, cmap, "thickness")), _s(cell(r, cmap, "schedule")),
                          _s(cell(r, cmap, "material")), weld_type_id(cell(r, cmap, "weld_type")),
                          _s(cell(r, cmap, "category")), _f(cell(r, cmap, "db_factor")) or 1,
-                         _f(cell(r, cmap, "db_count")), _s(cell(r, cmap, "shop_field")), wd,
+                         _dbc, _s(cell(r, cmap, "shop_field")), wd,
                          _s(cell(r, cmap, "subcontractor")),
                          "RT" if (nde_focus or nde_date) else None, percent, nde_date,
                          "合格" if nde_date else None, report,
@@ -270,6 +351,8 @@ def import_weld_control(path, project_code, project_name, owner=None,
                        "VALUES (?,?,?,?,?,?)",
                        (jid, "RT", percent, nde_date, "合格" if nde_date else None, report))
                     n_insp += 1
+
+        n_completed = _merge_completion(ex, project_id, wb)
 
         bp_sheet = pick_sheet(wb, "請款期別")
         n_bp = 0
@@ -287,7 +370,7 @@ def import_weld_control(path, project_code, project_name, owner=None,
 
         ex("INSERT INTO audit_log (operator,action,entity,entity_id,summary) VALUES (?,?,?,?,?)",
            (operator, "IMPORT", "project", project_id,
-            "匯入 %s:圖面 %d、焊口 %d、檢驗 %d、期別 %d" % (project_code, n_dwg, n_joint, n_insp, n_bp)))
+            "匯入 %s:圖面 %d、焊口 %d、檢驗 %d、期別 %d、完成 %d" % (project_code, n_dwg, n_joint, n_insp, n_bp, n_completed)))
         conn.commit()
     finally:
         conn.close()
@@ -295,7 +378,31 @@ def import_weld_control(path, project_code, project_name, owner=None,
 
     return {"project_id": project_id, "drawings": n_dwg, "joints": n_joint,
             "inspections": n_insp, "billing_periods": n_bp,
-            "systems": len(system_map), "lines": len(line_map)}
+            "systems": len(system_map), "lines": len(line_map), "completed": n_completed}
+
+
+def merge_completion_file(path, project_code_or_id, operator="user"):
+    """對既已匯入的專案,單獨用同一份 Excel 合併完成資料(不整案重匯)。"""
+    db.init_db()
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    conn = db.connect()
+    try:
+        ex = conn.execute
+        if isinstance(project_code_or_id, int) or str(project_code_or_id).isdigit():
+            pid = int(project_code_or_id)
+        else:
+            row = ex("SELECT id FROM project WHERE code=?", (project_code_or_id,)).fetchone()
+            pid = row[0] if row else None
+        if pid is None:
+            raise ValueError("找不到專案")
+        n = _merge_completion(ex, pid, wb)
+        ex("INSERT INTO audit_log (operator,action,entity,entity_id,summary) VALUES (?,?,?,?,?)",
+           (operator, "UPDATE", "project", pid, "合併完成資料:%d 筆" % n))
+        conn.commit()
+        return {"project_id": pid, "completed": n}
+    finally:
+        conn.close()
+        wb.close()
 
 
 if __name__ == "__main__":

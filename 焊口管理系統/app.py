@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 import db
 import importer
+import sizes
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="焊口管理系統 API", version="1.0")
@@ -30,7 +31,7 @@ def _startup():
 #  允許寫入的欄位(白名單,避免任意欄位注入)
 # ============================================================
 JOINT_COLS = {
-    "drawing_id", "line_id", "joint_no", "size", "thickness", "schedule",
+    "drawing_id", "line_id", "spool_id", "joint_no", "size", "thickness", "schedule",
     "material", "weld_type_id", "joint_category", "db_factor", "db_count",
     "shop_field", "welding_process", "wps_id", "welder_root_id", "welder_cap_id",
     "fitup_by", "fitup_date", "weld_date", "heat_no", "nde_type", "nde_percent",
@@ -54,6 +55,12 @@ ISSUE_COLS = {"weld_joint_id", "drawing_id", "issue_type", "description", "statu
 INSPECTION_COLS = {"weld_joint_id", "method", "percent", "request_date",
                    "inspect_date", "result", "report_no", "rt_drawing_no",
                    "inspector", "remark"}
+SPOOL_COLS = {"drawing_id", "spool_no", "shop_field", "status",
+              "fab_dwg_no", "scan_date", "ship_date", "remark"}
+HEAT_COLS = {"heat_no", "spec", "p_no", "size", "schedule",
+             "mtr_no", "mtr_path", "pmi_done", "remark"}
+FILLER_COLS = {"batch_no", "aws_class", "f_no", "spec", "bake_log", "remark"}
+JMAT_COLS = {"role", "heat_id", "filler_id", "remark"}
 
 
 def pick(payload, allowed):
@@ -161,6 +168,8 @@ def lookups(pid: int):
         "wps": db.query("SELECT id,wps_no FROM wps WHERE project_id=? ORDER BY wps_no", (pid,)),
         "billing_periods": db.query("SELECT id,code,status FROM billing_period WHERE project_id=? ORDER BY code", (pid,)),
         "lines": db.query("SELECT id,line_no FROM pipe_line WHERE project_id=? ORDER BY line_no", (pid,)),
+        "heats": db.query("SELECT id,heat_no,spec FROM material_heat WHERE project_id=? ORDER BY heat_no", (pid,)),
+        "fillers": db.query("SELECT id,batch_no,aws_class FROM filler_material WHERE project_id=? ORDER BY batch_no", (pid,)),
         "statuses": ["規劃", "組對", "完銲", "待檢", "合格", "不合格", "試壓", "完成"],
     }
 
@@ -219,7 +228,7 @@ def delete_drawing(did: int, operator: str = "user"):
 # ============================================================
 @app.get("/api/projects/{pid}/joints")
 def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
-                drawing_id: int = 0, billing: str = "",
+                drawing_id: int = 0, billing: str = "", spool_id: int = 0,
                 limit: int = 200, offset: int = 0):
     where = "WHERE wj.project_id=?"
     params = [pid]
@@ -234,6 +243,8 @@ def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
         where += " AND s.code=?"; params.append(system)
     if billing:
         where += " AND bp.code=?"; params.append(billing)
+    if spool_id:
+        where += " AND wj.spool_id=?"; params.append(spool_id)
     base = (
         "FROM weld_joint wj "
         "LEFT JOIN drawing d ON wj.drawing_id=d.id "
@@ -241,13 +252,14 @@ def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
         "LEFT JOIN system s ON pl.system_id=s.id "
         "LEFT JOIN weld_type wt ON wj.weld_type_id=wt.id "
         "LEFT JOIN billing_period bp ON wj.billing_period_id=bp.id "
+        "LEFT JOIN spool sp ON wj.spool_id=sp.id "
         f"{where}")
     rows = db.query(
         "SELECT wj.id, wj.joint_no, wj.size, wj.thickness, wj.material, "
         "wj.shop_field, wj.weld_date, wj.status, wj.nde_type, wj.nde_result, "
         "wj.db_count, wj.claim_status, wj.remark, "
         "d.drawing_no, d.serial_no, s.code AS system_code, wt.code AS weld_type, "
-        "bp.code AS billing_period "
+        "bp.code AS billing_period, sp.spool_no "
         + base + " ORDER BY d.serial_no, wj.joint_no LIMIT ? OFFSET ?",
         params + [limit, offset])
     total = db.query_one("SELECT COUNT(*) c " + base, params)["c"]
@@ -260,6 +272,11 @@ def get_joint(jid: int):
     if not j:
         raise HTTPException(404, "找不到焊口")
     j["inspections"] = db.query("SELECT * FROM inspection WHERE weld_joint_id=? ORDER BY id", (jid,))
+    j["materials"] = db.query(
+        "SELECT jm.*, mh.heat_no, fm.batch_no, fm.aws_class FROM joint_material jm "
+        "LEFT JOIN material_heat mh ON jm.heat_id=mh.id "
+        "LEFT JOIN filler_material fm ON jm.filler_id=fm.id "
+        "WHERE jm.weld_joint_id=? ORDER BY jm.id", (jid,))
     return j
 
 
@@ -270,6 +287,8 @@ def create_joint(pid: int, payload: dict = Body(...)):
     if not data.get("joint_no"):
         raise HTTPException(400, "需要銲口編號")
     data.setdefault("status", "規劃")
+    if data.get("db_count") in (None, "") and data.get("size"):
+        data["db_count"] = sizes.db_count(data.get("size"), data.get("db_factor") or 1)
     cols = ", ".join(data.keys())
     ph = ", ".join("?" for _ in data)
     try:
@@ -283,6 +302,8 @@ def create_joint(pid: int, payload: dict = Body(...)):
 @app.put("/api/joints/{jid}")
 def update_joint(jid: int, payload: dict = Body(...)):
     data = pick(payload, JOINT_COLS)
+    if data.get("db_count") in (None, "") and data.get("size"):
+        data["db_count"] = sizes.db_count(data.get("size"), data.get("db_factor") or 1)
     data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db.update("weld_joint", jid, data, op(payload), f"更新焊口 #{jid}")
     return db.query_one("SELECT * FROM weld_joint WHERE id=?", (jid,))
@@ -308,6 +329,193 @@ def advance_status(jid: int, payload: dict = Body(default={})):
         data["weld_date"] = datetime.date.today().strftime("%Y-%m-%d")
     db.update("weld_joint", jid, data, op(payload), f"焊口 #{jid} 狀態 {cur}→{nxt}")
     return db.query_one("SELECT * FROM weld_joint WHERE id=?", (jid,))
+
+
+@app.post("/api/projects/{pid}/joints/recompute-db")
+def recompute_db(pid: int, payload: dict = Body(default={})):
+    """為 DB數 空白(預設)且有尺寸的焊口,自動補算 max(1,吋)×係數。"""
+    only_blank = (payload or {}).get("only_blank", True)
+    where = "project_id=? AND size IS NOT NULL"
+    if only_blank:
+        where += " AND db_count IS NULL"
+    rows = db.query(f"SELECT id, size, db_factor FROM weld_joint WHERE {where}", (pid,))
+    n = 0
+    for r in rows:
+        v = sizes.db_count(r["size"], r["db_factor"] or 1)
+        if v is not None:
+            db.execute("UPDATE weld_joint SET db_count=? WHERE id=?", (v, r["id"])); n += 1
+    db.log(op(payload), "UPDATE", "weld_joint", pid, f"重算 DB數 {n} 筆")
+    return {"updated": n}
+
+
+# ============================================================
+#  Spool 預製分段
+# ============================================================
+@app.get("/api/projects/{pid}/spools")
+def list_spools(pid: int, q: str = "", drawing_id: int = 0):
+    where = "WHERE sp.project_id=?"
+    params = [pid]
+    if drawing_id:
+        where += " AND sp.drawing_id=?"; params.append(drawing_id)
+    if q:
+        where += " AND (sp.spool_no LIKE ? OR d.drawing_no LIKE ?)"
+        params += [f"%{q}%", f"%{q}%"]
+    rows = db.query(
+        "SELECT sp.*, d.drawing_no, d.serial_no, "
+        "(SELECT COUNT(*) FROM weld_joint w WHERE w.spool_id=sp.id) AS joint_count, "
+        "(SELECT COUNT(*) FROM weld_joint w WHERE w.spool_id=sp.id AND w.weld_date IS NOT NULL) AS welded, "
+        "(SELECT COALESCE(SUM(db_count),0) FROM weld_joint w WHERE w.spool_id=sp.id) AS db "
+        "FROM spool sp LEFT JOIN drawing d ON sp.drawing_id=d.id "
+        f"{where} ORDER BY d.serial_no, sp.spool_no", params)
+    return {"rows": rows, "total": len(rows)}
+
+
+@app.get("/api/drawings/{did}/spools")
+def list_drawing_spools(did: int):
+    return db.query("SELECT id, spool_no, shop_field, status FROM spool "
+                    "WHERE drawing_id=? ORDER BY spool_no", (did,))
+
+
+@app.post("/api/projects/{pid}/spools")
+def create_spool(pid: int, payload: dict = Body(...)):
+    data = pick(payload, SPOOL_COLS); data["project_id"] = pid
+    if not data.get("spool_no"):
+        raise HTTPException(400, "需要 spool 編號")
+    try:
+        sid = db.insert("spool", data, op(payload), f"新增 spool {data['spool_no']}")
+    except Exception as e:
+        raise HTTPException(409, f"spool 重複或錯誤:{e}")
+    return db.query_one("SELECT * FROM spool WHERE id=?", (sid,))
+
+
+@app.put("/api/spools/{sid}")
+def update_spool(sid: int, payload: dict = Body(...)):
+    db.update("spool", sid, pick(payload, SPOOL_COLS), op(payload), f"更新 spool #{sid}")
+    return db.query_one("SELECT * FROM spool WHERE id=?", (sid,))
+
+
+@app.delete("/api/spools/{sid}")
+def delete_spool(sid: int, operator: str = "user"):
+    db.execute("UPDATE weld_joint SET spool_id=NULL WHERE spool_id=?", (sid,))
+    db.delete("spool", sid, operator)
+    return {"ok": True}
+
+
+@app.post("/api/spools/{sid}/assign")
+def assign_joints_to_spool(sid: int, payload: dict = Body(...)):
+    """把一批焊口指派到此 spool。payload: {joint_ids:[...]}"""
+    ids = payload.get("joint_ids") or []
+    n = 0
+    for jid in ids:
+        db.execute("UPDATE weld_joint SET spool_id=? WHERE id=?", (sid, jid)); n += 1
+    db.log(op(payload), "UPDATE", "spool", sid, f"指派 {n} 個焊口到 spool #{sid}")
+    return {"assigned": n}
+
+
+@app.post("/api/projects/{pid}/spools/auto-build")
+def auto_build_spools(pid: int, payload: dict = Body(default={})):
+    """為每張圖的預製(S)且尚未歸 spool 的焊口,各建一個預設 spool 並掛上。"""
+    operator = op(payload)
+    dwgs = db.query(
+        "SELECT DISTINCT d.id, d.serial_no, d.drawing_no FROM drawing d "
+        "JOIN weld_joint w ON w.drawing_id=d.id "
+        "WHERE d.project_id=? AND w.shop_field='S' AND w.spool_id IS NULL", (pid,))
+    built = 0
+    for d in dwgs:
+        base = d["serial_no"] or d["drawing_no"] or str(d["id"])
+        spool_no = f"{base}-S01"
+        existing = db.query_one(
+            "SELECT id FROM spool WHERE project_id=? AND drawing_id=? AND spool_no=?",
+            (pid, d["id"], spool_no))
+        if existing:
+            sid = existing["id"]
+        else:
+            sid = db.execute(
+                "INSERT INTO spool (project_id,drawing_id,spool_no,shop_field,status) "
+                "VALUES (?,?,?,?,?)", (pid, d["id"], spool_no, "S", "規劃"))
+            built += 1
+        db.execute("UPDATE weld_joint SET spool_id=? "
+                   "WHERE drawing_id=? AND shop_field='S' AND spool_id IS NULL", (sid, d["id"]))
+    assigned = db.query_one(
+        "SELECT COUNT(*) c FROM weld_joint WHERE project_id=? AND spool_id IS NOT NULL", (pid,))["c"]
+    db.log(operator, "UPDATE", "spool", pid, f"自動建立 spool {built} 個")
+    return {"built": built, "assigned_total": assigned}
+
+
+# ============================================================
+#  材料追溯:爐號/MTR、銲材、焊口材料
+# ============================================================
+@app.get("/api/projects/{pid}/heats")
+def list_heats(pid: int):
+    return db.query("SELECT * FROM material_heat WHERE project_id=? ORDER BY heat_no", (pid,))
+
+
+@app.post("/api/projects/{pid}/heats")
+def create_heat(pid: int, payload: dict = Body(...)):
+    data = pick(payload, HEAT_COLS); data["project_id"] = pid
+    if not data.get("heat_no"):
+        raise HTTPException(400, "需要爐號")
+    try:
+        hid = db.insert("material_heat", data, op(payload), f"新增爐號 {data['heat_no']}")
+    except Exception as e:
+        raise HTTPException(409, f"爐號重複或錯誤:{e}")
+    return db.query_one("SELECT * FROM material_heat WHERE id=?", (hid,))
+
+
+@app.put("/api/heats/{hid}")
+def update_heat(hid: int, payload: dict = Body(...)):
+    db.update("material_heat", hid, pick(payload, HEAT_COLS), op(payload))
+    return db.query_one("SELECT * FROM material_heat WHERE id=?", (hid,))
+
+
+@app.delete("/api/heats/{hid}")
+def delete_heat(hid: int, operator: str = "user"):
+    db.delete("material_heat", hid, operator)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/fillers")
+def list_fillers(pid: int):
+    return db.query("SELECT * FROM filler_material WHERE project_id=? ORDER BY batch_no", (pid,))
+
+
+@app.post("/api/projects/{pid}/fillers")
+def create_filler(pid: int, payload: dict = Body(...)):
+    data = pick(payload, FILLER_COLS); data["project_id"] = pid
+    if not data.get("batch_no"):
+        raise HTTPException(400, "需要批號")
+    try:
+        fid = db.insert("filler_material", data, op(payload), f"新增銲材 {data['batch_no']}")
+    except Exception as e:
+        raise HTTPException(409, f"批號重複或錯誤:{e}")
+    return db.query_one("SELECT * FROM filler_material WHERE id=?", (fid,))
+
+
+@app.put("/api/fillers/{fid}")
+def update_filler(fid: int, payload: dict = Body(...)):
+    db.update("filler_material", fid, pick(payload, FILLER_COLS), op(payload))
+    return db.query_one("SELECT * FROM filler_material WHERE id=?", (fid,))
+
+
+@app.delete("/api/fillers/{fid}")
+def delete_filler(fid: int, operator: str = "user"):
+    db.delete("filler_material", fid, operator)
+    return {"ok": True}
+
+
+@app.post("/api/joints/{jid}/materials")
+def add_joint_material(jid: int, payload: dict = Body(...)):
+    data = pick(payload, JMAT_COLS); data["weld_joint_id"] = jid
+    cols = ", ".join(data.keys()); ph = ", ".join("?" for _ in data)
+    mid = db.execute(f"INSERT INTO joint_material ({cols}) VALUES ({ph})", tuple(data.values()))
+    db.log(op(payload), "CREATE", "joint_material", mid, f"焊口 #{jid} 掛材料")
+    return db.query_one("SELECT * FROM joint_material WHERE id=?", (mid,))
+
+
+@app.delete("/api/jmaterials/{mid}")
+def delete_joint_material(mid: int, operator: str = "user"):
+    db.delete("joint_material", mid, operator)
+    return {"ok": True}
 
 
 # ============================================================
@@ -467,6 +675,20 @@ async def import_excel(file: UploadFile = File(...), code: str = Form(...),
     finally:
         os.unlink(tmp.name)
     return summary
+
+
+@app.post("/api/projects/{pid}/merge-completion")
+async def merge_completion_api(pid: int, file: UploadFile = File(...), operator: str = Form("user")):
+    suffix = os.path.splitext(file.filename)[1] or ".xlsx"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(await file.read()); tmp.close()
+        result = importer.merge_completion_file(tmp.name, pid, operator)
+    except Exception as e:
+        raise HTTPException(400, f"合併失敗:{e}")
+    finally:
+        os.unlink(tmp.name)
+    return result
 
 
 @app.get("/api/projects/{pid}/export/joints.xlsx")

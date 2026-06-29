@@ -134,12 +134,71 @@ CREATE TABLE IF NOT EXISTS billing_period (
   UNIQUE(project_id, code)
 );
 
+-- ---------- Spool 預製分段 ----------
+-- 圖面 → spool → 焊口。廠內預製的最小單位;焊口可歸屬某個 spool。
+CREATE TABLE IF NOT EXISTS spool (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  drawing_id  INTEGER REFERENCES drawing(id) ON DELETE CASCADE,
+  spool_no    TEXT NOT NULL,
+  shop_field  TEXT DEFAULT 'S',
+  status      TEXT DEFAULT '規劃',
+  fab_dwg_no  TEXT,
+  scan_date   TEXT,
+  ship_date   TEXT,
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(project_id, drawing_id, spool_no)
+);
+
+-- ---------- 材料追溯:母材爐號 / MTR ----------
+CREATE TABLE IF NOT EXISTS material_heat (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  heat_no     TEXT NOT NULL,                 -- 爐號
+  spec        TEXT,                          -- 材質規格
+  p_no        TEXT,                          -- P-No
+  size        TEXT,
+  schedule    TEXT,
+  mtr_no      TEXT,                          -- MTR 證明文件號
+  mtr_path    TEXT,                          -- MTR 路徑/連結
+  pmi_done    INTEGER DEFAULT 0,
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(project_id, heat_no)
+);
+
+-- ---------- 材料追溯:銲材(消耗品) ----------
+CREATE TABLE IF NOT EXISTS filler_material (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  batch_no    TEXT NOT NULL,                 -- 批號
+  aws_class   TEXT,                          -- AWS class
+  f_no        TEXT,                          -- F-No
+  spec        TEXT,
+  bake_log    TEXT,                          -- 烘箱紀錄
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(project_id, batch_no)
+);
+
+-- ---------- 焊口 ↔ 材料(多值,含側別) ----------
+CREATE TABLE IF NOT EXISTS joint_material (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  weld_joint_id INTEGER NOT NULL REFERENCES weld_joint(id) ON DELETE CASCADE,
+  role          TEXT,                        -- A側母材/B側母材/銲材/背檔氣
+  heat_id       INTEGER REFERENCES material_heat(id) ON DELETE SET NULL,
+  filler_id     INTEGER REFERENCES filler_material(id) ON DELETE SET NULL,
+  remark        TEXT
+);
+
 -- ---------- 焊口 (Weld Joint) ★核心★ ----------
 CREATE TABLE IF NOT EXISTS weld_joint (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id     INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
   drawing_id     INTEGER REFERENCES drawing(id) ON DELETE SET NULL,
   line_id        INTEGER REFERENCES pipe_line(id),
+  spool_id       INTEGER REFERENCES spool(id) ON DELETE SET NULL,  -- 所屬 spool
   joint_no       TEXT NOT NULL,              -- 銲口編號
   -- 規格
   size           TEXT,
@@ -240,6 +299,8 @@ CREATE INDEX IF NOT EXISTS idx_joint_project ON weld_joint(project_id);
 CREATE INDEX IF NOT EXISTS idx_joint_drawing ON weld_joint(drawing_id);
 CREATE INDEX IF NOT EXISTS idx_joint_status  ON weld_joint(status);
 CREATE INDEX IF NOT EXISTS idx_joint_billing ON weld_joint(billing_period_id);
+CREATE INDEX IF NOT EXISTS idx_spool_drawing ON spool(drawing_id);
+CREATE INDEX IF NOT EXISTS idx_jmat_joint ON joint_material(weld_joint_id);
 CREATE INDEX IF NOT EXISTS idx_drawing_project ON drawing(project_id);
 CREATE INDEX IF NOT EXISTS idx_inspection_joint ON inspection(weld_joint_id);
 

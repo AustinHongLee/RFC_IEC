@@ -26,6 +26,7 @@
   <button data-view="dashboard" class="active">儀表板</button>
   <button data-view="drawings">圖面登錄</button>
   <button data-view="joints">焊口登錄</button>
+  <button data-view="spools">Spool 分段</button>
   <button data-view="billing">請款期別</button>
   <button data-view="issues">問題追蹤</button>
   <button data-view="master">基礎資料</button>
@@ -65,7 +66,10 @@
   <section class="view" id="view-joints">
     <div class="row-between">
       <div><h2 class="title">焊口登錄</h2><p class="sub">點任一列可編輯完整資訊 / 檢驗 / 狀態</p></div>
-      <button class="btn primary" id="addJointBtn">＋ 新增焊口</button>
+      <div>
+        <button class="btn" id="recomputeDbBtn">⚙ 補算 DB數</button>
+        <button class="btn primary" id="addJointBtn">＋ 新增焊口</button>
+      </div>
     </div>
     <div class="filters">
       <input type="search" id="jointSearch" placeholder="搜尋銲口編號 / 圖號 / 材質">
@@ -74,6 +78,22 @@
       <span class="muted" id="jointCount"></span>
     </div>
     <div class="tablewrap"><table id="jointTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- Spool 分段 -->
+  <section class="view" id="view-spools">
+    <div class="row-between">
+      <div><h2 class="title">Spool 分段</h2><p class="sub">圖面 → spool(預製分段)→ 焊口</p></div>
+      <div>
+        <button class="btn" id="autoBuildSpoolBtn">⚙ 自動建立預製 spool</button>
+        <button class="btn primary" id="addSpoolBtn">＋ 新增 spool</button>
+      </div>
+    </div>
+    <div class="filters">
+      <input type="search" id="spoolSearch" placeholder="搜尋 spool 編號 / 圖號">
+      <span class="muted" id="spoolCount"></span>
+    </div>
+    <div class="tablewrap"><table id="spoolTable"><thead></thead><tbody></tbody></table></div>
   </section>
 
   <!-- 請款 -->
@@ -109,6 +129,12 @@
     </div>
     <div class="panel"><h3>WPS 銲接程序規範 <button class="btn sm" id="addWpsBtn" style="float:right">＋</button></h3>
       <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="wpsTable"><thead></thead><tbody></tbody></table></div></div></div>
+    <div class="grid2">
+      <div class="panel"><h3>爐號 / MTR <button class="btn sm" id="addHeatBtn" style="float:right">＋</button></h3>
+        <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="heatTable"><thead></thead><tbody></tbody></table></div></div></div>
+      <div class="panel"><h3>銲材 Filler <button class="btn sm" id="addFillerBtn" style="float:right">＋</button></h3>
+        <div class="body"><div class="tablewrap" style="box-shadow:none;border:0"><table id="fillerTable"><thead></thead><tbody></tbody></table></div></div></div>
+    </div>
   </section>
 
   <!-- 匯入匯出 -->

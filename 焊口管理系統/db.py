@@ -33,11 +33,43 @@ def get_conn():
 
 
 def init_db():
-    """建立資料表(若不存在)。"""
+    """建立資料表(若不存在),再套用增量遷移。"""
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         sql = f.read()
     with get_conn() as conn:
         conn.executescript(sql)
+    run_migrations()
+
+
+# ---------- 增量遷移(對既有 weld.db 安全加欄位) ----------
+# schema.sql 用 CREATE TABLE IF NOT EXISTS,對已存在的表不會新增欄位;
+# 凡是要在既有表 ADD COLUMN 的變更都寫成一筆遷移,版本以 PRAGMA user_version 記錄。
+def _column_exists(conn, table, col):
+    return any(r[1] == col for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _add_column(conn, table, col, decl):
+    if not _column_exists(conn, table, col):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+def _mig_1_spool(conn):
+    _add_column(conn, "weld_joint", "spool_id", "INTEGER REFERENCES spool(id) ON DELETE SET NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_joint_spool ON weld_joint(spool_id)")
+
+
+MIGRATIONS = [
+    (1, _mig_1_spool),
+]
+
+
+def run_migrations():
+    with get_conn() as conn:
+        ver = conn.execute("PRAGMA user_version").fetchone()[0]
+        for v, fn in MIGRATIONS:
+            if v > ver:
+                fn(conn)
+                conn.execute(f"PRAGMA user_version = {v}")
 
 
 # ---------- 查詢輔助 ----------
