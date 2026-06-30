@@ -136,11 +136,7 @@ async function selectProject(pid) {
   State.project = State.projects.find(p => p.id === pid);
   $('#projectSel').value = pid;
   State.lookups = await api('GET', `/projects/${pid}/lookups`);
-  // 狀態/系統篩選下拉
-  $('#jointStatus').innerHTML = '<option value="">全部狀態</option>' +
-    State.lookups.statuses.map(s => `<option>${s}</option>`).join('');
-  $('#jointSystem').innerHTML = '<option value="">全部系統</option>' +
-    State.lookups.systems.map(s => `<option value="${esc(s.code)}">${esc(s.code)}</option>`).join('');
+  await populateJointFilters();
   const active = $('#tabs button.active').dataset.view;
   renderView(active);
 }
@@ -151,6 +147,7 @@ function renderView(v) {
   }
   ({ dashboard: renderDashboard, drawings: renderDrawings, joints: renderJoints,
      spools: renderSpools, billing: renderBilling, issues: renderIssues, master: renderMaster,
+     testpkg: renderTestpkg, mto: renderMto, mdr: renderMdr,
      audit: renderAudit, io: () => {} }[v] || (() => {}))();
 }
 
@@ -248,28 +245,110 @@ $('#addDrawingBtn').onclick = () => editDrawing(0);
 /* ===========================================================
    焊口
    =========================================================== */
-async function renderJoints() {
-  if (!State.project) return;
-  const p = new URLSearchParams({
-    q: $('#jointSearch').value.trim(), status: $('#jointStatus').value,
-    system: $('#jointSystem').value, limit: 300,
-  });
-  const res = await api('GET', `/projects/${State.project.id}/joints?` + p);
-  $('#jointCount').textContent = `共 ${res.total} 筆` + (res.total > 300 ? '(顯示前 300)' : '');
-  const cols = ['流水號', '圖號', '銲口', '尺寸', '材質', '型式', 'S/F', 'Spool', '完成日期', '狀態', '檢驗', '請款期別', ''];
-  $('#jointTable thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
-  $('#jointTable tbody').innerHTML = res.rows.length ? res.rows.map(r => `<tr class="clickable" onclick="editJoint(${r.id})">
+const JOINT_PAGE = 200;
+let jointOffset = 0;
+function jointFilterParams() {
+  return {
+    q: $('#jointSearch').value.trim(), system: $('#jointSystem').value, status: $('#jointStatus').value,
+    size: $('#jointSize').value, material: $('#jointMaterial').value, weld_type: $('#jointType').value,
+    shop_field: $('#jointSF').value, welder: $('#jointWelder').value, nde_result: $('#jointNde').value,
+    date_from: $('#jointFrom').value, date_to: $('#jointTo').value,
+  };
+}
+const jointRowHTML = r => `<tr class="clickable" onclick="editJoint(${r.id})">
+    <td><input type="checkbox" class="jsel" value="${r.id}" onclick="event.stopPropagation()"></td>
     <td class="mono">${esc(r.serial_no)}</td><td>${esc(r.drawing_no)}</td>
     <td class="mono">${esc(r.joint_no)}</td><td>${esc(r.size)}</td><td>${esc(r.material)}</td>
     <td>${esc(r.weld_type)}</td><td>${esc(r.shop_field)}</td><td class="mono">${esc(r.spool_no) || ''}</td><td>${esc(r.weld_date) || ''}</td>
     <td>${statusBadge(r.status)}</td>
     <td>${r.nde_result ? esc(r.nde_result) : (r.nde_type ? '<span class="muted">待檢</span>' : '')}</td>
     <td>${esc(r.billing_period) || ''}</td>
-    <td><button class="btn sm" onclick="event.stopPropagation();advanceJoint(${r.id})">推進▶</button></td></tr>`).join('')
-    : `<tr><td colspan="13" class="empty">尚無焊口</td></tr>`;
+    <td><button class="btn sm" onclick="event.stopPropagation();advanceJoint(${r.id})">推進▶</button></td></tr>`;
+async function renderJoints(append = false) {
+  if (!State.project) return;
+  if (append !== true) jointOffset = 0;
+  const p = new URLSearchParams({ ...jointFilterParams(), limit: JOINT_PAGE, offset: jointOffset });
+  const res = await api('GET', `/projects/${State.project.id}/joints?` + p);
+  const cols = ['<input type="checkbox" id="jselAll" title="全選本頁">', '流水號', '圖號', '銲口', '尺寸', '材質', '型式', 'S/F', 'Spool', '完成日期', '狀態', '檢驗', '請款期別', ''];
+  $('#jointTable thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+  const _jall = $('#jselAll'); if (_jall) _jall.onchange = e => { $$('.jsel').forEach(c => c.checked = e.target.checked); updateBatchBar(); };
+  const html = res.rows.map(jointRowHTML).join('');
+  if (append === true) $('#jointTable tbody').insertAdjacentHTML('beforeend', html);
+  else $('#jointTable tbody').innerHTML = html || `<tr><td colspan="14" class="empty">沒有符合條件的焊口</td></tr>`;
+  jointOffset += res.rows.length;
+  $('#jointCount').textContent = `共 ${res.total} 筆,已顯示 ${jointOffset}`;
+  const more = $('#jointMore');
+  if (jointOffset < res.total) {
+    more.innerHTML = `<button class="btn" id="jointMoreBtn">載入更多(剩 ${res.total - jointOffset})</button>`;
+    $('#jointMoreBtn').onclick = () => renderJoints(true);
+  } else { more.innerHTML = ''; }
+  $('#jointTable tbody').onchange = e => { if (e.target.classList.contains('jsel')) updateBatchBar(); };
+  updateBatchBar();
 }
-['jointSearch'].forEach(id => $('#' + id).oninput = debounce(renderJoints, 300));
-['jointStatus', 'jointSystem'].forEach(id => $('#' + id).onchange = renderJoints);
+async function populateJointFilters() {
+  const L = State.lookups;
+  let fo = {};
+  try { fo = await api('GET', `/projects/${State.project.id}/filter-options`); } catch (e) {}
+  const fill = (sel, label, items) => $(sel).innerHTML =
+    `<option value="">${label}</option>` + (items || []).map(x => `<option value="${esc(x.v)}">${esc(x.v)} (${x.n})</option>`).join('');
+  $('#jointSystem').innerHTML = '<option value="">系統</option>' +
+    (L.systems || []).map(s => `<option value="${esc(s.code)}">${esc(s.code)}</option>`).join('');
+  fill('#jointStatus', '狀態', fo.status);
+  fill('#jointSize', '尺寸', fo.size);
+  fill('#jointMaterial', '材質', fo.material);
+  fill('#jointType', '型式', fo.weld_type);
+  fill('#jointSF', 'S/F', fo.shop_field);
+  fill('#jointNde', 'NDE', fo.nde_result);
+  $('#jointWelder').innerHTML = '<option value="">焊工</option>' +
+    (L.welders || []).map(w => `<option value="${w.id}">${esc(w.stamp)}${w.name ? ' ' + esc(w.name) : ''}</option>`).join('');
+  if ($('#batchField')) renderBatchVal();
+}
+const JOINT_FILTER_IDS = ['jointSearch', 'jointSystem', 'jointStatus', 'jointSize', 'jointMaterial', 'jointType', 'jointSF', 'jointWelder', 'jointNde', 'jointFrom', 'jointTo'];
+$('#jointSearch').oninput = debounce(() => renderJoints(), 300);
+['jointSystem', 'jointStatus', 'jointSize', 'jointMaterial', 'jointType', 'jointSF', 'jointWelder', 'jointNde', 'jointFrom', 'jointTo'].forEach(id => $('#' + id).onchange = () => renderJoints());
+$('#jointClear').onclick = () => { JOINT_FILTER_IDS.forEach(id => $('#' + id).value = ''); renderJoints(); };
+$$('#view-joints [data-preset]').forEach(b => b.onclick = () => applyPreset(b.dataset.preset));
+function applyPreset(name) {
+  JOINT_FILTER_IDS.forEach(id => $('#' + id).value = '');
+  const map = { check: ['jointStatus', '待檢'], fail: ['jointNde', '不合格'], done: ['jointStatus', '完成'], shopS: ['jointSF', 'S'], fieldF: ['jointSF', 'F'] };
+  const m = map[name]; if (m) $('#' + m[0]).value = m[1];
+  renderJoints();
+}
+function updateBatchBar() {
+  const n = $$('.jsel:checked').length;
+  const bar = $('#jointBatch'); if (!bar) return;
+  bar.style.display = n ? '' : 'none';
+  if (n) $('#batchCount').textContent = n;
+}
+function renderBatchVal() {
+  const f = $('#batchField').value, L = State.lookups || {};
+  let h;
+  if (f === 'weld_date') h = `<input type="date" id="batchVal">`;
+  else if (f === 'status') h = `<select id="batchVal">${(L.statuses || []).map(s => `<option>${s}</option>`).join('')}</select>`;
+  else if (f === 'welder_root_id' || f === 'welder_cap_id') h = `<select id="batchVal"><option value="">—</option>${(L.welders || []).map(w => `<option value="${w.id}">${esc(w.stamp)}</option>`).join('')}</select>`;
+  else if (f === 'billing_period_id') h = `<select id="batchVal"><option value="">—</option>${(L.billing_periods || []).map(b => `<option value="${b.id}">${esc(b.code)}</option>`).join('')}</select>`;
+  else if (f === 'shop_field') h = `<select id="batchVal"><option value="S">S 預製</option><option value="F">F 現場</option></select>`;
+  else if (f === 'claim_status') h = `<select id="batchVal"><option>未請款</option><option>已請款</option></select>`;
+  else if (f === 'nde_result') h = `<select id="batchVal"><option>合格</option><option>不合格</option></select>`;
+  else if (f === 'test_package_id') h = `<select id="batchVal"><option value="">—</option>${(L.test_packages || []).map(t => `<option value="${t.id}">${esc(t.pkg_no)}</option>`).join('')}</select>`;
+  else h = `<input id="batchVal">`;
+  $('#batchValWrap').innerHTML = h;
+}
+if ($('#batchField')) {
+  $('#batchField').onchange = renderBatchVal;
+  $('#batchCancel').onclick = () => { $$('.jsel').forEach(c => c.checked = false); const a = $('#jselAll'); if (a) a.checked = false; updateBatchBar(); };
+  $('#batchApply').onclick = async () => {
+    const ids = $$('.jsel:checked').map(c => Number(c.value));
+    if (!ids.length) return;
+    const field = $('#batchField').value;
+    const valEl = $('#batchVal'); const value = valEl ? (valEl.value || null) : null;
+    const label = $('#batchField').selectedOptions[0].text;
+    if (!confirm(`確定把 ${ids.length} 口的「${label}」設成「${value == null ? '(空)' : value}」?`)) return;
+    const r = await api('POST', '/joints/batch', { ids, field, value });
+    toast(`已更新 ${r.updated} 口`); renderJoints();
+  };
+  renderBatchVal();
+}
 
 function jointFields() {
   const L = State.lookups;
@@ -309,6 +388,25 @@ function jointFields() {
   ];
 }
 
+function jointHeaderHTML(data) {
+  if (!data || !data.joint_no) return '';
+  const spec = [data.size, data.material, data.shop_field].filter(Boolean).join(' · ');
+  return `<div class="jhdr"><div><b>${esc(data.joint_no)}</b> <span class="muted">${esc(spec)}</span></div>${statusBadge(data.status)}</div>`;
+}
+function jointFormHTML(fields, data) {
+  let html = '', started = false, first = true;
+  fields.forEach(f => {
+    if (f.section) {
+      if (started) html += '</div></details>';
+      html += `<details class="acc"${first ? ' open' : ''}><summary>${esc(f.section)}</summary><div class="formgrid">`;
+      started = true; first = false;
+    } else {
+      html += fieldHTML(f, data);
+    }
+  });
+  if (started) html += '</div></details>';
+  return html;
+}
 async function editJoint(id) {
   // 確保 drawings 下拉資料
   if (!State.drawings.length || State.drawings._pid !== State.project.id) {
@@ -321,7 +419,7 @@ async function editJoint(id) {
     try { State.spoolOptions = await api('GET', `/drawings/${data.drawing_id}/spools`); } catch (e) {}
   }
   const fields = jointFields();
-  let body = formHTML(fields, data);
+  let body = jointHeaderHTML(data) + jointFormHTML(fields, data);
   if (id && data.inspections) body += inspectionBlock(id, data.inspections);
   if (id) body += materialBlock(id, data.materials || []);
   openModal(id ? `編輯焊口  ${esc(data.joint_no || '')}` : '新增焊口', body, [
@@ -592,6 +690,158 @@ async function renderAudit() {
 /* ===========================================================
    匯入 / 匯出 / 新專案
    =========================================================== */
+/* ===========================================================
+   試壓包 / Punch
+   =========================================================== */
+async function renderTestpkg() {
+  if (!State.project) return;
+  const rows = await api('GET', `/projects/${State.project.id}/test-packages`);
+  $('#testpkgTable thead').innerHTML = '<tr><th>編號</th><th>種類</th><th>壓力</th><th>試壓日</th><th>結果</th><th>焊口</th><th>未結Punch</th><th></th></tr>';
+  $('#testpkgTable tbody').innerHTML = rows.length ? rows.map(r => `<tr>
+    <td><b>${esc(r.pkg_no)}</b></td><td>${esc(r.kind)}</td><td>${esc(r.pressure)}</td>
+    <td>${esc(r.test_date) || ''}</td><td>${esc(r.result) || ''}</td>
+    <td class="mono">${r.joints}</td><td class="mono">${r.punch_open}</td>
+    <td><button class="btn sm" onclick="punchModal(${r.id},'${esc(r.pkg_no)}')">Punch</button>
+        <button class="btn sm" onclick="editTestpkg(${r.id})">編輯</button></td></tr>`).join('')
+    : `<tr><td colspan="8" class="empty">尚無試壓包</td></tr>`;
+}
+function testpkgFields() {
+  return [
+    { key: 'pkg_no', label: '試壓包編號 *' },
+    { key: 'kind', label: '種類', type: 'select', options: [{ v: '水壓', t: '水壓' }, { v: '氣壓', t: '氣壓' }] },
+    { key: 'medium', label: '介質' }, { key: 'pressure', label: '壓力' },
+    { key: 'test_date', label: '試壓日期', type: 'date' },
+    { key: 'result', label: '結果', type: 'select', options: [{ v: '合格', t: '合格' }, { v: '不合格', t: '不合格' }] },
+    { key: 'reinstated', label: '已復原', type: 'checkbox' },
+    { key: 'remark', label: '備註', type: 'textarea', full: true },
+  ];
+}
+async function editTestpkg(id) {
+  const data = id ? (await api('GET', `/projects/${State.project.id}/test-packages`)).find(r => r.id === id) : {};
+  const fields = testpkgFields();
+  openModal(id ? '編輯試壓包' : '新增試壓包', formHTML(fields, data), [
+    id ? { label: '刪除', cls: 'danger', onClick: () => delTestpkg(id) } : null,
+    { label: '取消', onClick: closeModal },
+    { label: '儲存', cls: 'primary', onClick: async () => {
+        const b = collectForm(fields); if (!b.pkg_no) return toast('請填編號', 'err');
+        if (id) await api('PUT', `/test-packages/${id}`, b); else await api('POST', `/projects/${State.project.id}/test-packages`, b);
+        toast('已儲存'); closeModal(); renderTestpkg(); selectProject(State.project.id);
+      } }].filter(Boolean));
+}
+async function delTestpkg(id) {
+  if (!confirm('刪除此試壓包?焊口的試壓包關聯會清除。')) return;
+  await api('DELETE', `/test-packages/${id}?operator=${encodeURIComponent(operator())}`);
+  toast('已刪除'); closeModal(); renderTestpkg();
+}
+async function punchModal(tid, pkg) {
+  const list = await api('GET', `/test-packages/${tid}/punch`);
+  const rows = list.map(p => `<tr><td>${esc(p.category)}</td><td>${esc(p.description)}</td><td>${esc(p.status)}</td>
+    <td><button class="btn sm" onclick="togglePunch(${p.id},'${esc(p.status)}',${tid},'${esc(pkg)}')">${p.status === '已結' ? '重開' : '結案'}</button></td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">尚無 punch</td></tr>';
+  const body = `<div class="section-label">Punch list — ${esc(pkg)}</div>
+    <table style="width:100%;font-size:13px"><thead><tr><th>分類</th><th>說明</th><th>狀態</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="formgrid three" style="margin-top:10px">
+      <div class="fg"><label>分類</label><input id="pu_cat"></div>
+      <div class="fg full"><label>說明</label><input id="pu_desc"></div>
+      <div class="fg" style="align-self:end"><button class="btn sm primary" onclick="addPunch(${tid},'${esc(pkg)}')">＋ 新增 Punch</button></div>
+    </div>`;
+  openModal(`試壓包 ${esc(pkg)} — Punch`, body, [{ label: '關閉', onClick: closeModal }]);
+}
+async function addPunch(tid, pkg) {
+  await api('POST', `/test-packages/${tid}/punch`, { category: $('#pu_cat').value || null, description: $('#pu_desc').value || null });
+  toast('已新增'); punchModal(tid, pkg);
+}
+async function togglePunch(id, cur, tid, pkg) {
+  await api('PUT', `/punch/${id}`, { status: cur === '已結' ? '待處理' : '已結' });
+  punchModal(tid, pkg);
+}
+$('#addTestpkgBtn').onclick = () => editTestpkg(0);
+
+/* ===========================================================
+   採購 / MTO
+   =========================================================== */
+async function renderMto() {
+  if (!State.project) return;
+  const p = new URLSearchParams({ q: $('#mtoSearch').value.trim(), status: $('#mtoStatus').value });
+  const rows = await api('GET', `/projects/${State.project.id}/mto?` + p);
+  $('#mtoTable thead').innerHTML = '<tr><th>圖號</th><th>品名</th><th>規格</th><th>材質</th><th>尺寸</th><th>數量</th><th>來源</th><th>料況</th><th>採購單</th><th></th></tr>';
+  $('#mtoTable tbody').innerHTML = rows.length ? rows.map(r => `<tr${r.status === '缺料' ? ' style="background:#fef2f2"' : ''}>
+    <td>${esc(r.drawing_no) || ''}</td><td>${esc(r.item_name)}</td><td>${esc(r.spec)}</td>
+    <td>${esc(r.material)}</td><td>${esc(r.size)}</td><td class="mono">${esc(r.qty) || ''} ${esc(r.unit) || ''}</td>
+    <td>${esc(r.source) || ''}</td><td>${esc(r.status)}</td><td>${esc(r.po_no) || ''}</td>
+    <td><button class="btn sm" onclick="editMto(${r.id})">編輯</button></td></tr>`).join('')
+    : `<tr><td colspan="10" class="empty">尚無物料</td></tr>`;
+}
+$('#mtoSearch').oninput = debounce(renderMto, 300);
+$('#mtoStatus').onchange = renderMto;
+function mtoFields() {
+  return [
+    { key: 'drawing_id', label: '所屬圖面', type: 'select', options: State.drawings.map(d => ({ v: d.id, t: (d.serial_no ? d.serial_no + '｜' : '') + d.drawing_no })) },
+    { key: 'item_name', label: '品名' }, { key: 'spec', label: '規格' },
+    { key: 'material', label: '材質' }, { key: 'size', label: '尺寸' }, { key: 'schedule', label: 'SCH' },
+    { key: 'qty', label: '數量', type: 'number' }, { key: 'unit', label: '單位' },
+    { key: 'source', label: '來源', type: 'select', options: [{ v: '自購', t: '自購' }, { v: '業主供料', t: '業主供料' }] },
+    { key: 'status', label: '料況', type: 'select', empty: false, options: ['需求', '已採購', '到料', '缺料'].map(s => ({ v: s, t: s })) },
+    { key: 'po_id', label: '採購單', type: 'select', options: (State.lookups.purchase_orders || []).map(o => ({ v: o.id, t: o.po_no })) },
+    { key: 'remark', label: '備註', type: 'textarea', full: true },
+  ];
+}
+async function editMto(id) {
+  if (!State.drawings.length || State.drawings._pid !== State.project.id) {
+    const dr = await api('GET', `/projects/${State.project.id}/drawings?limit=2000`); State.drawings = dr.rows; State.drawings._pid = State.project.id;
+  }
+  const data = id ? (await api('GET', `/projects/${State.project.id}/mto`)).find(r => r.id === id) : {};
+  const fields = mtoFields();
+  openModal(id ? '編輯物料' : '新增物料', formHTML(fields, data), [
+    id ? { label: '刪除', cls: 'danger', onClick: () => delMto(id) } : null,
+    { label: '取消', onClick: closeModal },
+    { label: '儲存', cls: 'primary', onClick: async () => {
+        const b = collectForm(fields);
+        if (id) await api('PUT', `/mto/${id}`, b); else await api('POST', `/projects/${State.project.id}/mto`, b);
+        toast('已儲存'); closeModal(); renderMto();
+      } }].filter(Boolean));
+}
+async function delMto(id) { if (!confirm('刪除此物料?')) return; await api('DELETE', `/mto/${id}?operator=${encodeURIComponent(operator())}`); toast('已刪除'); closeModal(); renderMto(); }
+$('#addMtoBtn').onclick = () => editMto(0);
+$('#addPoBtn').onclick = () => {
+  const fields = [{ key: 'po_no', label: '採購單號 *' }, { key: 'vendor', label: '廠商' }, { key: 'date', label: '日期', type: 'date' },
+    { key: 'status', label: '狀態', type: 'select', empty: false, options: ['已採購', '部分到料', '到料'].map(s => ({ v: s, t: s })) }, { key: 'remark', label: '備註', full: true }];
+  openModal('新增採購單', formHTML(fields, {}), [{ label: '取消', onClick: closeModal },
+    { label: '儲存', cls: 'primary', onClick: async () => { const b = collectForm(fields); if (!b.po_no) return toast('請填單號', 'err'); await api('POST', `/projects/${State.project.id}/purchase-orders`, b); toast('已新增'); closeModal(); selectProject(State.project.id); } }]);
+};
+
+/* ===========================================================
+   品保卷冊 MDR
+   =========================================================== */
+async function renderMdr() {
+  if (!State.project) return;
+  const rows = await api('GET', `/projects/${State.project.id}/mdr`);
+  $('#mdrTable thead').innerHTML = '<tr><th>類型</th><th>標題</th><th>文件號</th><th>狀態</th><th></th></tr>';
+  $('#mdrTable tbody').innerHTML = rows.length ? rows.map(r => `<tr>
+    <td>${esc(r.doc_type)}</td><td>${esc(r.title)}</td><td>${esc(r.ref_no)}</td><td>${esc(r.status)}</td>
+    <td><button class="btn sm" onclick="editMdr(${r.id})">編輯</button></td></tr>`).join('')
+    : `<tr><td colspan="5" class="empty">尚無卷冊文件</td></tr>`;
+}
+function mdrFields() {
+  return [
+    { key: 'doc_type', label: '類型', type: 'select', options: ['weld map', 'MTR', 'NDE報告', '試壓紀錄', 'PWHT', 'as-built', '其他'].map(s => ({ v: s, t: s })) },
+    { key: 'title', label: '標題' }, { key: 'ref_no', label: '文件號' },
+    { key: 'status', label: '狀態', type: 'select', empty: false, options: ['待彙整', '已彙整', '已移交'].map(s => ({ v: s, t: s })) },
+    { key: 'file_path', label: '檔案路徑/連結', full: true },
+    { key: 'remark', label: '備註', type: 'textarea', full: true },
+  ];
+}
+async function editMdr(id) {
+  const data = id ? (await api('GET', `/projects/${State.project.id}/mdr`)).find(r => r.id === id) : {};
+  const fields = mdrFields();
+  openModal(id ? '編輯卷冊文件' : '新增卷冊文件', formHTML(fields, data), [
+    id ? { label: '刪除', cls: 'danger', onClick: () => delMdr(id) } : null,
+    { label: '取消', onClick: closeModal },
+    { label: '儲存', cls: 'primary', onClick: async () => { const b = collectForm(fields); if (id) await api('PUT', `/mdr/${id}`, b); else await api('POST', `/projects/${State.project.id}/mdr`, b); toast('已儲存'); closeModal(); renderMdr(); } }].filter(Boolean));
+}
+async function delMdr(id) { if (!confirm('刪除此文件?')) return; await api('DELETE', `/mdr/${id}?operator=${encodeURIComponent(operator())}`); toast('已刪除'); closeModal(); renderMdr(); }
+$('#addMdrBtn').onclick = () => editMdr(0);
+
 function bindButtons() {
   $('#newProjectBtn').onclick = () => {
     const fields = [{ key: 'code', label: '專案代號 *' }, { key: 'name', label: '專案名稱 *' },
@@ -613,10 +863,12 @@ function bindButtons() {
     const fd = new FormData();
     fd.append('file', f); fd.append('code', $('#impCode').value); fd.append('name', $('#impName').value);
     fd.append('owner', $('#impOwner').value); fd.append('operator', operator());
+    fd.append('mode', $('#impMode').value);
+    if ($('#impMode').value === 'replace' && !confirm('「重建」會把整個專案刪掉重來,會洗掉所有手動輸入的資料。確定?')) return;
     $('#importResult').innerHTML = '<span class="muted">匯入中,請稍候…</span>';
     try {
       const r = await api('POST', '/import', fd);
-      $('#importResult').innerHTML = `<div class="hint">✓ 匯入完成:圖面 <b>${r.drawings}</b>、焊口 <b>${r.joints}</b>、系統 ${r.systems}、管線 ${r.lines}、檢驗 ${r.inspections}、期別 ${r.billing_periods}</div>`;
+      $('#importResult').innerHTML = `<div class="hint">✓ 匯入完成(${r.mode === 'replace' ? '重建' : '合併'}):新圖 <b>${r.drawings}</b>、既有圖 ${r.drawings_existing || 0}、新焊口 <b>${r.joints}</b>、既有焊口(手動保護)${r.joints_existing || 0}、檢驗 ${r.inspections}、期別 ${r.billing_periods}、完成合併 ${r.completed || 0}</div>`;
       await loadProjects(); selectProject(r.project_id);
     } catch (e) { $('#importResult').innerHTML = '<span style="color:#c0392b">匯入失敗</span>'; }
   };

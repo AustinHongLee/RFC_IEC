@@ -204,7 +204,7 @@ def _merge_completion(ex, project_id, wb):
 
 
 def import_weld_control(path, project_code, project_name, owner=None,
-                        operator="importer", replace=True):
+                        operator="importer", mode="merge"):
     db.init_db()
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     conn = db.connect()
@@ -216,7 +216,7 @@ def import_weld_control(path, project_code, project_name, owner=None,
 
     try:
         pid_row = ex("SELECT id FROM project WHERE code=?", (project_code,)).fetchone()
-        if pid_row and replace:
+        if pid_row and mode == "replace":
             ex("DELETE FROM project WHERE id=?", (pid_row[0],))
             pid_row = None
         if pid_row:
@@ -249,6 +249,10 @@ def import_weld_control(path, project_code, project_name, owner=None,
             return wt_map[code]
 
         system_map, line_map, drawing_map, drawing_line = {}, {}, {}, {}
+        existing_joints = {}
+        for _r in ex("SELECT id, drawing_id, joint_no FROM weld_joint WHERE project_id=?", (project_id,)).fetchall():
+            existing_joints[(_r[1], _key(_r[2]))] = _r[0]
+        n_dwg_kept = n_joint_upd = 0
 
         def get_system(code):
             code = normalize(code)
@@ -288,17 +292,29 @@ def import_weld_control(path, project_code, project_name, owner=None,
                     continue
                 sys_id = get_system(cell(r, cmap, "system"))
                 line_id = get_line(cell(r, cmap, "line_no"), sys_id)
-                drawing_map[dno] = ex(
-                    "INSERT INTO drawing (project_id,drawing_no,serial_no,line_id,system_id,"
-                    "pipe_class,size,sheet_index,num_sheets,current_rev,scan_date,remark) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (project_id, dno, _s(cell(r, cmap, "serial")), line_id, sys_id,
-                     _s(cell(r, cmap, "pipe_class")), _s(cell(r, cmap, "size")),
-                     _int(cell(r, cmap, "sheet_index")), _int(cell(r, cmap, "num_sheets")),
-                     _s(cell(r, cmap, "rev")), roc_to_iso(cell(r, cmap, "scan_date")),
-                     _s(cell(r, cmap, "remark")))).lastrowid
+                _ed = ex("SELECT id FROM drawing WHERE project_id=? AND drawing_no=?", (project_id, dno)).fetchone()
+                if _ed:
+                    ex("UPDATE drawing SET serial_no=COALESCE(serial_no,?), line_id=COALESCE(line_id,?), "
+                       "system_id=COALESCE(system_id,?), pipe_class=COALESCE(pipe_class,?), size=COALESCE(size,?), "
+                       "sheet_index=COALESCE(sheet_index,?), num_sheets=COALESCE(num_sheets,?), "
+                       "current_rev=COALESCE(current_rev,?), scan_date=COALESCE(scan_date,?) WHERE id=?",
+                       (_s(cell(r, cmap, "serial")), line_id, sys_id, _s(cell(r, cmap, "pipe_class")),
+                        _s(cell(r, cmap, "size")), _int(cell(r, cmap, "sheet_index")), _int(cell(r, cmap, "num_sheets")),
+                        _s(cell(r, cmap, "rev")), roc_to_iso(cell(r, cmap, "scan_date")), _ed[0]))
+                    drawing_map[dno] = _ed[0]
+                    n_dwg_kept += 1
+                else:
+                    drawing_map[dno] = ex(
+                        "INSERT INTO drawing (project_id,drawing_no,serial_no,line_id,system_id,"
+                        "pipe_class,size,sheet_index,num_sheets,current_rev,scan_date,remark) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (project_id, dno, _s(cell(r, cmap, "serial")), line_id, sys_id,
+                         _s(cell(r, cmap, "pipe_class")), _s(cell(r, cmap, "size")),
+                         _int(cell(r, cmap, "sheet_index")), _int(cell(r, cmap, "num_sheets")),
+                         _s(cell(r, cmap, "rev")), roc_to_iso(cell(r, cmap, "scan_date")),
+                         _s(cell(r, cmap, "remark")))).lastrowid
+                    n_dwg += 1
                 drawing_line[dno] = line_id
-                n_dwg += 1
 
         jt_sheet = pick_sheet(wb, "焊口編號明細",
                               lambda n: n.startswith("焊口編號明細") and "分析" not in n,
@@ -317,8 +333,9 @@ def import_weld_control(path, project_code, project_name, owner=None,
                 if dno is not None:
                     dno = str(dno).strip()
                     if dno not in drawing_map:
-                        drawing_map[dno] = ex("INSERT OR IGNORE INTO drawing (project_id,drawing_no) VALUES (?,?)",
-                                              (project_id, dno)).lastrowid
+                        _ed = ex("SELECT id FROM drawing WHERE project_id=? AND drawing_no=?", (project_id, dno)).fetchone()
+                        drawing_map[dno] = _ed[0] if _ed else ex(
+                            "INSERT INTO drawing (project_id,drawing_no) VALUES (?,?)", (project_id, dno)).lastrowid
                     drawing_id = drawing_map[dno]
                 wd = roc_to_iso(cell(r, cmap, "weld_date"))
                 nde_focus = cell(r, cmap, "nde_focus")
@@ -328,6 +345,21 @@ def import_weld_control(path, project_code, project_name, owner=None,
                 _dbc = _f(cell(r, cmap, "db_count"))
                 if _dbc is None:
                     _dbc = sizes.db_count(_s(cell(r, cmap, "size")), _f(cell(r, cmap, "db_factor")) or 1)
+                _jkey = (drawing_id, _key(jno))
+                if _jkey in existing_joints:
+                    try:
+                        ex("UPDATE weld_joint SET size=COALESCE(size,?), thickness=COALESCE(thickness,?), "
+                           "schedule=COALESCE(schedule,?), material=COALESCE(material,?), "
+                           "weld_type_id=COALESCE(weld_type_id,?), joint_category=COALESCE(joint_category,?), "
+                           "db_count=COALESCE(db_count,?), shop_field=COALESCE(shop_field,?) WHERE id=?",
+                           (_s(cell(r, cmap, "size")), _s(cell(r, cmap, "thickness")), _s(cell(r, cmap, "schedule")),
+                            _s(cell(r, cmap, "material")), weld_type_id(cell(r, cmap, "weld_type")),
+                            _s(cell(r, cmap, "category")), _dbc, _s(cell(r, cmap, "shop_field")),
+                            existing_joints[_jkey]))
+                        n_joint_upd += 1
+                    except Exception:
+                        pass
+                    continue
                 try:
                     jid = ex(
                         "INSERT INTO weld_joint (project_id,drawing_id,line_id,joint_no,size,thickness,"
@@ -345,6 +377,7 @@ def import_weld_control(path, project_code, project_name, owner=None,
                          "完成" if wd else "規劃", "未請款", _s(cell(r, cmap, "remark")))).lastrowid
                 except Exception:
                     continue
+                existing_joints[_jkey] = jid
                 n_joint += 1
                 if nde_date or nde_focus:
                     ex("INSERT INTO inspection (weld_joint_id,method,percent,inspect_date,result,report_no) "
@@ -370,13 +403,16 @@ def import_weld_control(path, project_code, project_name, owner=None,
 
         ex("INSERT INTO audit_log (operator,action,entity,entity_id,summary) VALUES (?,?,?,?,?)",
            (operator, "IMPORT", "project", project_id,
-            "匯入 %s:圖面 %d、焊口 %d、檢驗 %d、期別 %d、完成 %d" % (project_code, n_dwg, n_joint, n_insp, n_bp, n_completed)))
+            "匯入(%s)%s:新圖 %d、既有圖 %d、新焊口 %d、既有焊口(保護手動)%d、檢驗 %d、期別 %d、完成 %d"
+            % (mode, project_code, n_dwg, n_dwg_kept, n_joint, n_joint_upd, n_insp, n_bp, n_completed)))
         conn.commit()
     finally:
         conn.close()
         wb.close()
 
-    return {"project_id": project_id, "drawings": n_dwg, "joints": n_joint,
+    return {"project_id": project_id, "mode": mode,
+            "drawings": n_dwg, "drawings_existing": n_dwg_kept,
+            "joints": n_joint, "joints_existing": n_joint_upd,
             "inspections": n_insp, "billing_periods": n_bp,
             "systems": len(system_map), "lines": len(line_map), "completed": n_completed}
 

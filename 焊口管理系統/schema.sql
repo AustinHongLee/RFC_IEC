@@ -294,6 +294,78 @@ CREATE TABLE IF NOT EXISTS audit_log (
   summary   TEXT                             -- 可讀說明
 );
 
+-- ---------- 試壓包 (Test Package) ----------
+CREATE TABLE IF NOT EXISTS test_package (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  pkg_no      TEXT NOT NULL,
+  kind        TEXT,                          -- 水壓/氣壓
+  medium      TEXT,
+  pressure    TEXT,
+  test_date   TEXT,
+  result      TEXT,                          -- 合格/不合格
+  reinstated  INTEGER DEFAULT 0,
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(project_id, pkg_no)
+);
+
+-- ---------- Punch List ----------
+CREATE TABLE IF NOT EXISTS punch_item (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  test_package_id INTEGER REFERENCES test_package(id) ON DELETE CASCADE,
+  category        TEXT,
+  description     TEXT,
+  status          TEXT DEFAULT '待處理',
+  remark          TEXT,
+  created_at      TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- ---------- 品保卷冊 (MDR / Turnover) ----------
+CREATE TABLE IF NOT EXISTS mdr_document (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  doc_type    TEXT,
+  title       TEXT,
+  ref_no      TEXT,
+  status      TEXT DEFAULT '待彙整',
+  file_path   TEXT,
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- ---------- 採購單 (Purchase Order) ----------
+CREATE TABLE IF NOT EXISTS purchase_order (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  po_no       TEXT NOT NULL,
+  vendor      TEXT,
+  date        TEXT,
+  status      TEXT DEFAULT '已採購',
+  remark      TEXT,
+  UNIQUE(project_id, po_no)
+);
+
+-- ---------- 物料需求 (MTO) ----------
+CREATE TABLE IF NOT EXISTS mto_item (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  drawing_id  INTEGER REFERENCES drawing(id) ON DELETE SET NULL,
+  item_name   TEXT,
+  spec        TEXT,
+  material    TEXT,
+  size        TEXT,
+  schedule    TEXT,
+  qty         REAL,
+  unit        TEXT,
+  source      TEXT,                          -- 自購/業主供料
+  status      TEXT DEFAULT '需求',            -- 需求/已採購/到料/缺料
+  po_id       INTEGER REFERENCES purchase_order(id) ON DELETE SET NULL,
+  remark      TEXT,
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+
 -- ---------- 索引 ----------
 CREATE INDEX IF NOT EXISTS idx_joint_project ON weld_joint(project_id);
 CREATE INDEX IF NOT EXISTS idx_joint_drawing ON weld_joint(drawing_id);
@@ -303,6 +375,14 @@ CREATE INDEX IF NOT EXISTS idx_spool_drawing ON spool(drawing_id);
 CREATE INDEX IF NOT EXISTS idx_jmat_joint ON joint_material(weld_joint_id);
 CREATE INDEX IF NOT EXISTS idx_drawing_project ON drawing(project_id);
 CREATE INDEX IF NOT EXISTS idx_inspection_joint ON inspection(weld_joint_id);
+CREATE INDEX IF NOT EXISTS idx_joint_size ON weld_joint(size);
+CREATE INDEX IF NOT EXISTS idx_joint_material ON weld_joint(material);
+CREATE INDEX IF NOT EXISTS idx_joint_shopfield ON weld_joint(shop_field);
+CREATE INDEX IF NOT EXISTS idx_joint_welddate ON weld_joint(weld_date);
+CREATE INDEX IF NOT EXISTS idx_joint_welderroot ON weld_joint(welder_root_id);
+CREATE INDEX IF NOT EXISTS idx_punch_pkg ON punch_item(test_package_id);
+CREATE INDEX IF NOT EXISTS idx_mto_drawing ON mto_item(drawing_id);
+CREATE INDEX IF NOT EXISTS idx_mto_po ON mto_item(po_id);
 
 -- ---------- 分析 View:焊口完整檢視 ----------
 DROP VIEW IF EXISTS v_joint_full;

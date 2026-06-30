@@ -36,7 +36,7 @@ JOINT_COLS = {
     "shop_field", "welding_process", "wps_id", "welder_root_id", "welder_cap_id",
     "fitup_by", "fitup_date", "weld_date", "heat_no", "nde_type", "nde_percent",
     "nde_date", "nde_result", "nde_report_no", "repair_count", "pwht_required",
-    "pwht_done", "pwht_date", "test_package", "test_date", "test_result",
+    "pwht_done", "pwht_date", "test_package", "test_package_id", "test_date", "test_result",
     "status", "subcontractor", "billing_period_id", "claim_status", "remark",
 }
 DRAWING_COLS = {
@@ -61,6 +61,12 @@ HEAT_COLS = {"heat_no", "spec", "p_no", "size", "schedule",
              "mtr_no", "mtr_path", "pmi_done", "remark"}
 FILLER_COLS = {"batch_no", "aws_class", "f_no", "spec", "bake_log", "remark"}
 JMAT_COLS = {"role", "heat_id", "filler_id", "remark"}
+TESTPKG_COLS = {"pkg_no", "kind", "medium", "pressure", "test_date", "result", "reinstated", "remark"}
+PUNCH_COLS = {"test_package_id", "category", "description", "status", "remark"}
+MDR_COLS = {"doc_type", "title", "ref_no", "status", "file_path", "remark"}
+PO_COLS = {"po_no", "vendor", "date", "status", "remark"}
+MTO_COLS = {"drawing_id", "item_name", "spec", "material", "size", "schedule",
+            "qty", "unit", "source", "status", "po_id", "remark"}
 
 
 def pick(payload, allowed):
@@ -170,6 +176,8 @@ def lookups(pid: int):
         "lines": db.query("SELECT id,line_no FROM pipe_line WHERE project_id=? ORDER BY line_no", (pid,)),
         "heats": db.query("SELECT id,heat_no,spec FROM material_heat WHERE project_id=? ORDER BY heat_no", (pid,)),
         "fillers": db.query("SELECT id,batch_no,aws_class FROM filler_material WHERE project_id=? ORDER BY batch_no", (pid,)),
+        "test_packages": db.query("SELECT id,pkg_no FROM test_package WHERE project_id=? ORDER BY pkg_no", (pid,)),
+        "purchase_orders": db.query("SELECT id,po_no,vendor FROM purchase_order WHERE project_id=? ORDER BY po_no", (pid,)),
         "statuses": ["規劃", "組對", "完銲", "待檢", "合格", "不合格", "試壓", "完成"],
     }
 
@@ -229,6 +237,9 @@ def delete_drawing(did: int, operator: str = "user"):
 @app.get("/api/projects/{pid}/joints")
 def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
                 drawing_id: int = 0, billing: str = "", spool_id: int = 0,
+                size: str = "", material: str = "", weld_type: str = "",
+                shop_field: str = "", welder: int = 0, nde_result: str = "",
+                date_from: str = "", date_to: str = "",
                 limit: int = 200, offset: int = 0):
     where = "WHERE wj.project_id=?"
     params = [pid]
@@ -245,6 +256,24 @@ def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
         where += " AND bp.code=?"; params.append(billing)
     if spool_id:
         where += " AND wj.spool_id=?"; params.append(spool_id)
+    if size:
+        where += " AND wj.size=?"; params.append(size)
+    if material:
+        where += " AND wj.material=?"; params.append(material)
+    if weld_type:
+        where += " AND wt.code=?"; params.append(weld_type)
+    if shop_field:
+        where += " AND wj.shop_field=?"; params.append(shop_field)
+    if welder:
+        where += " AND (wj.welder_root_id=? OR wj.welder_cap_id=?)"; params += [welder, welder]
+    if nde_result == "未檢":
+        where += " AND wj.nde_result IS NULL"
+    elif nde_result:
+        where += " AND wj.nde_result=?"; params.append(nde_result)
+    if date_from:
+        where += " AND wj.weld_date>=?"; params.append(date_from)
+    if date_to:
+        where += " AND wj.weld_date<=?"; params.append(date_to)
     base = (
         "FROM weld_joint wj "
         "LEFT JOIN drawing d ON wj.drawing_id=d.id "
@@ -264,6 +293,20 @@ def list_joints(pid: int, q: str = "", status: str = "", system: str = "",
         params + [limit, offset])
     total = db.query_one("SELECT COUNT(*) c " + base, params)["c"]
     return {"rows": rows, "total": total}
+
+
+@app.get("/api/projects/{pid}/filter-options")
+def filter_options(pid: int):
+    def g(sql):
+        return db.query(sql, (pid,))
+    return {
+        "size": g("SELECT size AS v, COUNT(*) n FROM weld_joint WHERE project_id=? AND size IS NOT NULL AND size<>'' GROUP BY size ORDER BY n DESC"),
+        "material": g("SELECT material AS v, COUNT(*) n FROM weld_joint WHERE project_id=? AND material IS NOT NULL AND material<>'' GROUP BY material ORDER BY n DESC"),
+        "weld_type": g("SELECT wt.code AS v, COUNT(*) n FROM weld_joint wj JOIN weld_type wt ON wj.weld_type_id=wt.id WHERE wj.project_id=? GROUP BY wt.code ORDER BY n DESC"),
+        "shop_field": g("SELECT shop_field AS v, COUNT(*) n FROM weld_joint WHERE project_id=? AND shop_field IS NOT NULL AND shop_field<>'' GROUP BY shop_field ORDER BY n DESC"),
+        "nde_result": g("SELECT COALESCE(nde_result,'未檢') AS v, COUNT(*) n FROM weld_joint WHERE project_id=? GROUP BY COALESCE(nde_result,'未檢') ORDER BY n DESC"),
+        "status": g("SELECT status AS v, COUNT(*) n FROM weld_joint WHERE project_id=? GROUP BY status ORDER BY n DESC"),
+    }
 
 
 @app.get("/api/joints/{jid}")
@@ -329,6 +372,27 @@ def advance_status(jid: int, payload: dict = Body(default={})):
         data["weld_date"] = datetime.date.today().strftime("%Y-%m-%d")
     db.update("weld_joint", jid, data, op(payload), f"焊口 #{jid} 狀態 {cur}→{nxt}")
     return db.query_one("SELECT * FROM weld_joint WHERE id=?", (jid,))
+
+
+@app.post("/api/joints/batch")
+def batch_update_joints(payload: dict = Body(...)):
+    """批次更新多個焊口的單一欄位(白名單)。payload: {ids:[...], field, value}"""
+    ids = payload.get("ids") or []
+    field = payload.get("field")
+    value = payload.get("value")
+    allowed = {"weld_date", "welder_root_id", "welder_cap_id", "status",
+               "billing_period_id", "shop_field", "claim_status", "nde_result",
+               "subcontractor", "test_package_id", "spool_id"}
+    if field not in allowed:
+        raise HTTPException(400, "不允許的批次欄位")
+    if value in ("", None):
+        value = None
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n = 0
+    for jid in ids:
+        db.execute(f"UPDATE weld_joint SET {field}=?, updated_at=? WHERE id=?", (value, ts, jid)); n += 1
+    db.log(op(payload), "UPDATE", "weld_joint", 0, f"批次更新 {field} 共 {n} 筆")
+    return {"updated": n}
 
 
 @app.post("/api/projects/{pid}/joints/recompute-db")
@@ -659,17 +723,187 @@ def audit(limit: int = 200):
 
 
 # ============================================================
+#  試壓包 / Punch
+# ============================================================
+@app.get("/api/projects/{pid}/test-packages")
+def list_test_packages(pid: int):
+    return db.query(
+        "SELECT tp.*, "
+        "(SELECT COUNT(*) FROM weld_joint w WHERE w.test_package_id=tp.id) joints, "
+        "(SELECT COUNT(*) FROM punch_item p WHERE p.test_package_id=tp.id AND p.status!='已結') punch_open "
+        "FROM test_package tp WHERE project_id=? ORDER BY pkg_no", (pid,))
+
+
+@app.post("/api/projects/{pid}/test-packages")
+def create_test_package(pid: int, payload: dict = Body(...)):
+    data = pick(payload, TESTPKG_COLS); data["project_id"] = pid
+    if not data.get("pkg_no"):
+        raise HTTPException(400, "需要試壓包編號")
+    try:
+        tid = db.insert("test_package", data, op(payload), f"新增試壓包 {data['pkg_no']}")
+    except Exception as e:
+        raise HTTPException(409, f"試壓包重複或錯誤:{e}")
+    return db.query_one("SELECT * FROM test_package WHERE id=?", (tid,))
+
+
+@app.put("/api/test-packages/{tid}")
+def update_test_package(tid: int, payload: dict = Body(...)):
+    db.update("test_package", tid, pick(payload, TESTPKG_COLS), op(payload))
+    return db.query_one("SELECT * FROM test_package WHERE id=?", (tid,))
+
+
+@app.delete("/api/test-packages/{tid}")
+def delete_test_package(tid: int, operator: str = "user"):
+    db.execute("UPDATE weld_joint SET test_package_id=NULL WHERE test_package_id=?", (tid,))
+    db.delete("test_package", tid, operator)
+    return {"ok": True}
+
+
+@app.post("/api/test-packages/{tid}/assign")
+def assign_joints_to_pkg(tid: int, payload: dict = Body(...)):
+    ids = payload.get("joint_ids") or []
+    n = 0
+    for jid in ids:
+        db.execute("UPDATE weld_joint SET test_package_id=? WHERE id=?", (tid, jid)); n += 1
+    db.log(op(payload), "UPDATE", "test_package", tid, f"指派 {n} 個焊口到試壓包 #{tid}")
+    return {"assigned": n}
+
+
+@app.get("/api/test-packages/{tid}/punch")
+def list_punch(tid: int):
+    return db.query("SELECT * FROM punch_item WHERE test_package_id=? ORDER BY id", (tid,))
+
+
+@app.post("/api/test-packages/{tid}/punch")
+def create_punch(tid: int, payload: dict = Body(...)):
+    data = pick(payload, PUNCH_COLS); data["test_package_id"] = tid
+    tp = db.query_one("SELECT project_id FROM test_package WHERE id=?", (tid,))
+    data["project_id"] = tp["project_id"] if tp else None
+    cols = ", ".join(data.keys()); ph = ", ".join("?" for _ in data)
+    pn = db.execute(f"INSERT INTO punch_item ({cols}) VALUES ({ph})", tuple(data.values()))
+    db.log(op(payload), "CREATE", "punch_item", pn, "新增 punch")
+    return db.query_one("SELECT * FROM punch_item WHERE id=?", (pn,))
+
+
+@app.put("/api/punch/{punch_id}")
+def update_punch(punch_id: int, payload: dict = Body(...)):
+    db.update("punch_item", punch_id, pick(payload, PUNCH_COLS), op(payload))
+    return db.query_one("SELECT * FROM punch_item WHERE id=?", (punch_id,))
+
+
+@app.delete("/api/punch/{punch_id}")
+def delete_punch(punch_id: int, operator: str = "user"):
+    db.delete("punch_item", punch_id, operator)
+    return {"ok": True}
+
+
+# ============================================================
+#  品保卷冊 MDR
+# ============================================================
+@app.get("/api/projects/{pid}/mdr")
+def list_mdr(pid: int):
+    return db.query("SELECT * FROM mdr_document WHERE project_id=? ORDER BY id DESC", (pid,))
+
+
+@app.post("/api/projects/{pid}/mdr")
+def create_mdr(pid: int, payload: dict = Body(...)):
+    data = pick(payload, MDR_COLS); data["project_id"] = pid
+    mid = db.insert("mdr_document", data, op(payload), f"新增卷冊 {data.get('title') or ''}")
+    return db.query_one("SELECT * FROM mdr_document WHERE id=?", (mid,))
+
+
+@app.put("/api/mdr/{mid}")
+def update_mdr(mid: int, payload: dict = Body(...)):
+    db.update("mdr_document", mid, pick(payload, MDR_COLS), op(payload))
+    return db.query_one("SELECT * FROM mdr_document WHERE id=?", (mid,))
+
+
+@app.delete("/api/mdr/{mid}")
+def delete_mdr(mid: int, operator: str = "user"):
+    db.delete("mdr_document", mid, operator)
+    return {"ok": True}
+
+
+# ============================================================
+#  採購 / MTO 物料
+# ============================================================
+@app.get("/api/projects/{pid}/purchase-orders")
+def list_pos(pid: int):
+    return db.query(
+        "SELECT po.*, (SELECT COUNT(*) FROM mto_item m WHERE m.po_id=po.id) items "
+        "FROM purchase_order po WHERE project_id=? ORDER BY po_no", (pid,))
+
+
+@app.post("/api/projects/{pid}/purchase-orders")
+def create_po(pid: int, payload: dict = Body(...)):
+    data = pick(payload, PO_COLS); data["project_id"] = pid
+    if not data.get("po_no"):
+        raise HTTPException(400, "需要採購單號")
+    try:
+        poid = db.insert("purchase_order", data, op(payload), f"新增採購單 {data['po_no']}")
+    except Exception as e:
+        raise HTTPException(409, f"採購單重複或錯誤:{e}")
+    return db.query_one("SELECT * FROM purchase_order WHERE id=?", (poid,))
+
+
+@app.put("/api/purchase-orders/{poid}")
+def update_po(poid: int, payload: dict = Body(...)):
+    db.update("purchase_order", poid, pick(payload, PO_COLS), op(payload))
+    return db.query_one("SELECT * FROM purchase_order WHERE id=?", (poid,))
+
+
+@app.delete("/api/purchase-orders/{poid}")
+def delete_po(poid: int, operator: str = "user"):
+    db.execute("UPDATE mto_item SET po_id=NULL WHERE po_id=?", (poid,))
+    db.delete("purchase_order", poid, operator)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/mto")
+def list_mto(pid: int, status: str = "", q: str = ""):
+    where = "WHERE m.project_id=?"; params = [pid]
+    if status:
+        where += " AND m.status=?"; params.append(status)
+    if q:
+        where += " AND (m.item_name LIKE ? OR m.spec LIKE ? OR m.material LIKE ?)"; params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    return db.query(
+        "SELECT m.*, d.drawing_no, po.po_no FROM mto_item m "
+        "LEFT JOIN drawing d ON m.drawing_id=d.id "
+        "LEFT JOIN purchase_order po ON m.po_id=po.id "
+        f"{where} ORDER BY m.status, m.id DESC", params)
+
+
+@app.post("/api/projects/{pid}/mto")
+def create_mto(pid: int, payload: dict = Body(...)):
+    data = pick(payload, MTO_COLS); data["project_id"] = pid
+    mid = db.insert("mto_item", data, op(payload), f"新增物料 {data.get('item_name') or ''}")
+    return db.query_one("SELECT * FROM mto_item WHERE id=?", (mid,))
+
+
+@app.put("/api/mto/{mid}")
+def update_mto(mid: int, payload: dict = Body(...)):
+    db.update("mto_item", mid, pick(payload, MTO_COLS), op(payload))
+    return db.query_one("SELECT * FROM mto_item WHERE id=?", (mid,))
+
+
+@app.delete("/api/mto/{mid}")
+def delete_mto(mid: int, operator: str = "user"):
+    db.delete("mto_item", mid, operator)
+    return {"ok": True}
+
+
+# ============================================================
 #  匯入 / 匯出 Excel
 # ============================================================
 @app.post("/api/import")
 async def import_excel(file: UploadFile = File(...), code: str = Form(...),
                        name: str = Form(...), owner: str = Form(""),
-                       operator: str = Form("user")):
+                       operator: str = Form("user"), mode: str = Form("merge")):
     suffix = os.path.splitext(file.filename)[1] or ".xlsx"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
         tmp.write(await file.read()); tmp.close()
-        summary = importer.import_weld_control(tmp.name, code, name, owner or None, operator)
+        summary = importer.import_weld_control(tmp.name, code, name, owner or None, operator, mode)
     except Exception as e:
         raise HTTPException(400, f"匯入失敗:{e}")
     finally:

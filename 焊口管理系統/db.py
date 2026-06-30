@@ -58,8 +58,14 @@ def _mig_1_spool(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_joint_spool ON weld_joint(spool_id)")
 
 
+def _mig_2_testpkg(conn):
+    _add_column(conn, "weld_joint", "test_package_id", "INTEGER REFERENCES test_package(id) ON DELETE SET NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_joint_testpkg ON weld_joint(test_package_id)")
+
+
 MIGRATIONS = [
     (1, _mig_1_spool),
+    (2, _mig_2_testpkg),
 ]
 
 

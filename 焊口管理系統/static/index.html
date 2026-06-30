@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>焊口管理系統</title>
 <link rel="stylesheet" href="/style.css">
+<style>
+.acc{border:1px solid #e5e7eb;border-radius:8px;margin:8px 0;background:#fff}
+.acc>summary{cursor:pointer;padding:9px 12px;font-weight:600;list-style:none;color:#334155}
+.acc>summary::-webkit-details-marker{display:none}
+.acc>summary:before{content:'\25B8  ';color:#94a3b8}
+.acc[open]>summary:before{content:'\25BE  ';color:#475569}
+.acc>.formgrid{padding:4px 12px 12px}
+.jhdr{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 12px;background:#f1f5f9;border-radius:8px;margin-bottom:8px}
+.jhdr b{font-size:15px}
+</style>
 </head>
 <body>
 
@@ -29,6 +39,9 @@
   <button data-view="spools">Spool 分段</button>
   <button data-view="billing">請款期別</button>
   <button data-view="issues">問題追蹤</button>
+  <button data-view="testpkg">試壓</button>
+  <button data-view="mto">採購</button>
+  <button data-view="mdr">卷冊</button>
   <button data-view="master">基礎資料</button>
   <button data-view="io">匯入 / 匯出</button>
   <button data-view="audit">稽核日誌</button>
@@ -72,12 +85,47 @@
       </div>
     </div>
     <div class="filters">
-      <input type="search" id="jointSearch" placeholder="搜尋銲口編號 / 圖號 / 材質">
-      <select id="jointStatus"><option value="">全部狀態</option></select>
-      <select id="jointSystem"><option value="">全部系統</option></select>
-      <span class="muted" id="jointCount"></span>
+      <input type="search" id="jointSearch" placeholder="搜尋銲口/圖號/材質" style="min-width:150px">
+      <select id="jointSystem"><option value="">系統</option></select>
+      <select id="jointStatus"><option value="">狀態</option></select>
+      <select id="jointSize"><option value="">尺寸</option></select>
+      <select id="jointMaterial"><option value="">材質</option></select>
+      <select id="jointType"><option value="">型式</option></select>
+      <select id="jointSF"><option value="">S/F</option></select>
+      <select id="jointWelder"><option value="">焊工</option></select>
+      <select id="jointNde"><option value="">NDE</option></select>
+      <input type="date" id="jointFrom" title="完銲起日" style="width:138px">
+      <input type="date" id="jointTo" title="完銲迄日" style="width:138px">
+      <button class="btn sm" id="jointClear">清除</button>
+    </div>
+    <div class="filters" style="margin-top:-2px">
+      <span class="muted" style="font-size:12px">快速:</span>
+      <button class="btn sm" data-preset="check">待檢</button>
+      <button class="btn sm" data-preset="fail">不合格</button>
+      <button class="btn sm" data-preset="done">已完成</button>
+      <button class="btn sm" data-preset="shopS">預製 S</button>
+      <button class="btn sm" data-preset="fieldF">現場 F</button>
+      <span class="muted" id="jointCount" style="margin-left:auto"></span>
+    </div>
+    <div class="filters" id="jointBatch" style="display:none;background:#eef2ff;border-radius:8px;padding:7px 10px;align-items:center">
+      已選 <b id="batchCount">0</b> 口,一次填:
+      <select id="batchField">
+        <option value="status">狀態</option>
+        <option value="weld_date">完銲日期</option>
+        <option value="welder_root_id">打底焊工</option>
+        <option value="welder_cap_id">蓋面焊工</option>
+        <option value="billing_period_id">請款期別</option>
+        <option value="shop_field">S/F</option>
+        <option value="claim_status">請款狀態</option>
+        <option value="nde_result">NDE結果</option>
+        <option value="test_package_id">試壓包</option>
+      </select>
+      <span id="batchValWrap"></span>
+      <button class="btn sm primary" id="batchApply">套用</button>
+      <button class="btn sm" id="batchCancel">取消選取</button>
     </div>
     <div class="tablewrap"><table id="jointTable"><thead></thead><tbody></tbody></table></div>
+    <div id="jointMore" style="margin-top:10px;text-align:center"></div>
   </section>
 
   <!-- Spool 分段 -->
@@ -117,6 +165,40 @@
     <div class="tablewrap"><table id="issueTable"><thead></thead><tbody></tbody></table></div>
   </section>
 
+  <!-- 試壓 -->
+  <section class="view" id="view-testpkg">
+    <div class="row-between">
+      <div><h2 class="title">試壓包</h2><p class="sub">建立試壓包;焊口用「焊口頁 → 勾選 → 批次:試壓包」指派;可記 punch</p></div>
+      <button class="btn primary" id="addTestpkgBtn">＋ 新增試壓包</button>
+    </div>
+    <div class="tablewrap"><table id="testpkgTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 採購 -->
+  <section class="view" id="view-mto">
+    <div class="row-between">
+      <div><h2 class="title">採購 / 物料 (MTO)</h2><p class="sub">物料需求與料況;缺料整列標紅</p></div>
+      <div>
+        <button class="btn" id="addPoBtn">＋ 採購單</button>
+        <button class="btn primary" id="addMtoBtn">＋ 新增物料</button>
+      </div>
+    </div>
+    <div class="filters">
+      <input type="search" id="mtoSearch" placeholder="搜尋品名 / 規格 / 材質">
+      <select id="mtoStatus"><option value="">全部料況</option><option>需求</option><option>已採購</option><option>到料</option><option>缺料</option></select>
+    </div>
+    <div class="tablewrap"><table id="mtoTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <!-- 卷冊 -->
+  <section class="view" id="view-mdr">
+    <div class="row-between">
+      <div><h2 class="title">品保卷冊 (MDR / Turnover)</h2><p class="sub">移交文件登錄與狀態</p></div>
+      <button class="btn primary" id="addMdrBtn">＋ 新增文件</button>
+    </div>
+    <div class="tablewrap"><table id="mdrTable"><thead></thead><tbody></tbody></table></div>
+  </section>
+
   <!-- 基礎資料 -->
   <section class="view" id="view-master">
     <h2 class="title">基礎資料</h2>
@@ -148,6 +230,7 @@
           <div class="fg"><label>專案代號 *</label><input id="impCode" placeholder="例如 cp-129"></div>
           <div class="fg"><label>專案名稱 *</label><input id="impName" placeholder="例如 HP6精濾區配管工事"></div>
           <div class="fg full"><label>業主</label><input id="impOwner" placeholder="(選填)"></div>
+          <div class="fg full"><label>匯入模式</label><select id="impMode"><option value="merge">合併(只補新焊口,手填欄位不被覆蓋)— 建議</option><option value="replace">重建(危險:整案刪除重來)</option></select></div>
           <div class="fg full"><label>Excel 檔</label><input type="file" id="impFile" accept=".xlsx,.xlsm"></div>
         </div>
         <div style="margin-top:14px"><button class="btn primary" id="doImportBtn">開始匯入</button></div>
